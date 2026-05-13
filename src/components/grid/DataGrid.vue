@@ -927,6 +927,7 @@ const {
   requestDeleteRow,
   confirmDeleteRow,
   restoreRow,
+  restoreRows,
   pendingDeleteRowIds,
   requestDeleteRows,
   cloneRows,
@@ -1109,6 +1110,22 @@ function affectedRowIds(): number[] {
     return displayItems.value.slice(range.startRow, range.endRow + 1).map((item) => item.id);
   }
   return [];
+}
+
+function exportSelectedRowsCsv() {
+  return exportCsv(affectedRowIds());
+}
+
+function exportSelectedRowsXlsx() {
+  return exportXlsx(affectedRowIds());
+}
+
+function exportSelectedRowsJson() {
+  return exportJson(affectedRowIds());
+}
+
+function exportSelectedRowsMarkdown() {
+  return exportMarkdown(affectedRowIds());
 }
 
 function isRowActive(index: number): boolean {
@@ -2620,8 +2637,12 @@ defineExpose({
             <CopyPlus class="w-3.5 h-3.5 mr-2" />
             {{ isMultiRow ? t("grid.cloneRows", { count: multiRowCount }) : t("grid.cloneRow") }}
           </ContextMenuItem>
-          <ContextMenuItem v-if="contextRowItem.isDeleted" @click="restoreRow(contextRowItem.id)">
-            <Undo2 class="w-3.5 h-3.5 mr-2" /> {{ t("grid.restoreRow") }}
+          <ContextMenuItem
+            v-if="contextRowItem.isDeleted"
+            @click="isMultiRow ? restoreRows(affectedRowIds()) : restoreRow(contextRowItem.id)"
+          >
+            <Undo2 class="w-3.5 h-3.5 mr-2" />
+            {{ isMultiRow ? t("grid.restoreRows", { count: multiRowCount }) : t("grid.restoreRow") }}
           </ContextMenuItem>
           <ContextMenuItem
             v-else
@@ -2640,6 +2661,15 @@ defineExpose({
             <ContextMenuItem @click="exportXlsx">{{ t("grid.exportXlsx") }}</ContextMenuItem>
             <ContextMenuItem @click="exportJson">{{ t("grid.exportJson") }}</ContextMenuItem>
             <ContextMenuItem @click="exportMarkdown">{{ t("grid.exportMarkdown") }}</ContextMenuItem>
+            <template v-if="isMultiRow">
+              <ContextMenuSeparator />
+              <ContextMenuItem @click="exportSelectedRowsCsv">{{ t("grid.exportSelectedRowsCsv") }}</ContextMenuItem>
+              <ContextMenuItem @click="exportSelectedRowsXlsx">{{ t("grid.exportSelectedRowsXlsx") }}</ContextMenuItem>
+              <ContextMenuItem @click="exportSelectedRowsJson">{{ t("grid.exportSelectedRowsJson") }}</ContextMenuItem>
+              <ContextMenuItem @click="exportSelectedRowsMarkdown">{{
+                t("grid.exportSelectedRowsMarkdown")
+              }}</ContextMenuItem>
+            </template>
           </ContextMenuSubContent>
         </ContextMenuSub>
       </ContextMenuContent>
@@ -2664,7 +2694,7 @@ defineExpose({
       <span v-if="result.truncated" class="text-amber-500 text-xs ml-1">(truncated)</span>
       <span v-if="!hasData">{{ t("grid.rowsAffected", { count: result.affected_rows }) }}</span>
       <span>{{ result.execution_time_ms }}ms</span>
-      <span v-if="hasCellSelection" class="text-foreground">{{ selectionSummary }}</span>
+      <span v-if="selectedRowCount > 0 || hasCellSelection" class="text-foreground">{{ selectionSummary }}</span>
 
       <template v-if="editable && (tableMeta || customSave) && !useTransaction">
         <span v-if="hasPendingChanges" class="ml-2 text-foreground">
@@ -2718,6 +2748,15 @@ defineExpose({
           <DropdownMenuItem @click="exportXlsx">{{ t("grid.exportXlsx") }}</DropdownMenuItem>
           <DropdownMenuItem @click="exportJson">{{ t("grid.exportJson") }}</DropdownMenuItem>
           <DropdownMenuItem @click="exportMarkdown">{{ t("grid.exportMarkdown") }}</DropdownMenuItem>
+          <template v-if="isMultiRow">
+            <ContextMenuSeparator />
+            <DropdownMenuItem @click="exportSelectedRowsCsv">{{ t("grid.exportSelectedRowsCsv") }}</DropdownMenuItem>
+            <DropdownMenuItem @click="exportSelectedRowsXlsx">{{ t("grid.exportSelectedRowsXlsx") }}</DropdownMenuItem>
+            <DropdownMenuItem @click="exportSelectedRowsJson">{{ t("grid.exportSelectedRowsJson") }}</DropdownMenuItem>
+            <DropdownMenuItem @click="exportSelectedRowsMarkdown">{{
+              t("grid.exportSelectedRowsMarkdown")
+            }}</DropdownMenuItem>
+          </template>
         </DropdownMenuContent>
       </DropdownMenu>
 
