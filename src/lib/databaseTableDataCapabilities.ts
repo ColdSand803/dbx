@@ -66,6 +66,15 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
       transaction: false,
     },
   },
+  clickhouse: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: true,
+      deleteRequiresPrimaryKey: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: false,
+    },
+  },
 };
 
 export function getDatabaseCapability(dbType?: DatabaseType): DatabaseCapability {
