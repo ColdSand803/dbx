@@ -135,6 +135,7 @@ test("builds Hive grid save statements without primary keys using row predicates
 });
 
 test("builds TDengine append-only grid save statements", () => {
+  const newTs = tdengineTimestampLiteral("2026-05-16 09:40:00.000");
   const statements = buildDataGridSaveStatements({
     databaseType: "tdengine",
     tableMeta: {
@@ -150,11 +151,13 @@ test("builds TDengine append-only grid save statements", () => {
   });
 
   assert.deepEqual(statements, [
-    "INSERT INTO `test_db`.`meters` (`ts`, `current`, `voltage`, `location`, `groupid`) VALUES ('2026-05-16T09:40:00.000+08:00', 12.1, 220, 'Shenzhen', 3);",
+    `INSERT INTO \`test_db\`.\`meters\` (\`ts\`, \`current\`, \`voltage\`, \`location\`, \`groupid\`) VALUES (${newTs}, 12.1, 220, 'Shenzhen', 3);`,
   ]);
 });
 
 test("builds TDengine supertable overwrites as full-row inserts by tbname and timestamp", () => {
+  const existingTs = tdengineTimestampLiteral("2026-05-16 09:35:57.000");
+  const newTs = tdengineTimestampLiteral("2026-05-16 09:40:00.000");
   const statements = buildDataGridSaveStatements({
     databaseType: "tdengine",
     tableMeta: {
@@ -177,12 +180,14 @@ test("builds TDengine supertable overwrites as full-row inserts by tbname and ti
   });
 
   assert.deepEqual(statements, [
-    "INSERT INTO `test_db`.`meters` (`tbname`, `ts`, `current`, `voltage`, `location`, `groupid`) VALUES ('d1001', '2026-05-16T09:35:57.000+08:00', 11.1, 219, 'Beijing', 1);",
-    "INSERT INTO `test_db`.`meters` (`tbname`, `ts`, `current`, `voltage`, `location`, `groupid`) VALUES ('d1003', '2026-05-16T09:40:00.000+08:00', 12.1, 220, 'Shenzhen', 3);",
+    `INSERT INTO \`test_db\`.\`meters\` (\`tbname\`, \`ts\`, \`current\`, \`voltage\`, \`location\`, \`groupid\`) VALUES ('d1001', ${existingTs}, 11.1, 219, 'Beijing', 1);`,
+    `INSERT INTO \`test_db\`.\`meters\` (\`tbname\`, \`ts\`, \`current\`, \`voltage\`, \`location\`, \`groupid\`) VALUES ('d1003', ${newTs}, 12.1, 220, 'Shenzhen', 3);`,
   ]);
 });
 
 test("builds TDengine child table overwrites without pseudo or tag columns", () => {
+  const existingTs = tdengineTimestampLiteral("2026-05-16 09:35:57.000");
+  const newTs = tdengineTimestampLiteral("2026-05-16 09:40:00.000");
   const statements = buildDataGridSaveStatements({
     databaseType: "tdengine",
     tableMeta: {
@@ -205,14 +210,30 @@ test("builds TDengine child table overwrites without pseudo or tag columns", () 
   });
 
   assert.deepEqual(statements, [
-    "INSERT INTO `test_db`.`d1001` (`ts`, `current`, `voltage`) VALUES ('2026-05-16T09:35:57.000+08:00', 11.1, 219);",
-    "INSERT INTO `test_db`.`d1001` (`ts`, `current`, `voltage`) VALUES ('2026-05-16T09:40:00.000+08:00', 12.1, 220);",
+    `INSERT INTO \`test_db\`.\`d1001\` (\`ts\`, \`current\`, \`voltage\`) VALUES (${existingTs}, 11.1, 219);`,
+    `INSERT INTO \`test_db\`.\`d1001\` (\`ts\`, \`current\`, \`voltage\`) VALUES (${newTs}, 12.1, 220);`,
   ]);
 });
 
 test("formats TDengine timestamp literals with the local timezone offset", () => {
-  assert.equal(formatGridSqlLiteral("2026-05-16 09:35:57.975", "tdengine"), "'2026-05-16T09:35:57.975+08:00'");
+  assert.equal(
+    formatGridSqlLiteral("2026-05-16 09:35:57.975", "tdengine"),
+    tdengineTimestampLiteral("2026-05-16 09:35:57.975"),
+  );
 });
+
+function tdengineTimestampLiteral(text: string): string {
+  const [datePart, timePart] = text.split(" ");
+  const [time, rawFraction = ""] = timePart.split(".");
+  const fraction = `.${rawFraction.padEnd(3, "0").slice(0, 3)}`;
+  const date = new Date(`${datePart}T${time}${fraction}`);
+  const offsetMinutes = date.getTimezoneOffset();
+  const sign = offsetMinutes <= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMinutes);
+  const hours = String(Math.floor(abs / 60)).padStart(2, "0");
+  const minutes = String(abs % 60).padStart(2, "0");
+  return `'${datePart}T${time}${fraction}${sign}${hours}:${minutes}'`;
+}
 
 test("builds Trino insert statements with schema-qualified identifiers", () => {
   const statements = buildDataGridSaveStatements({
