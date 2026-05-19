@@ -103,6 +103,29 @@ impl AgentMethod {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MongoAgentMethod {
+    ListDatabases,
+    ListCollections,
+    FindDocuments,
+    InsertDocument,
+    UpdateDocument,
+    DeleteDocument,
+}
+
+impl MongoAgentMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ListDatabases => "list_databases",
+            Self::ListCollections => "list_collections",
+            Self::FindDocuments => "find_documents",
+            Self::InsertDocument => "insert_document",
+            Self::UpdateDocument => "update_document",
+            Self::DeleteDocument => "delete_document",
+        }
+    }
+}
+
 struct StderrTail {
     lines: VecDeque<String>,
     capacity: usize,
@@ -320,6 +343,53 @@ impl AgentDriverClient {
         self.call_method(AgentMethod::FetchQueryPage, params).await
     }
 
+    pub async fn call_mongo_method<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        method: MongoAgentMethod,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call(method.as_str(), params).await
+    }
+
+    pub async fn mongo_list_databases<T: DeserializeOwned + Send + 'static>(&mut self) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::ListDatabases, serde_json::json!({})).await
+    }
+
+    pub async fn mongo_list_collections<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::ListCollections, mongo_database_params(database)).await
+    }
+
+    pub async fn mongo_find_documents<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::FindDocuments, params).await
+    }
+
+    pub async fn mongo_insert_document<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::InsertDocument, params).await
+    }
+
+    pub async fn mongo_update_document<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::UpdateDocument, params).await
+    }
+
+    pub async fn mongo_delete_document<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::DeleteDocument, params).await
+    }
+
     pub async fn try_optional_handshake(&mut self, app_version: &str) -> Option<AgentHandshake> {
         match self.call_method::<AgentHandshake>(AgentMethod::Handshake, agent_handshake_params(app_version)).await {
             Ok(handshake) => {
@@ -383,6 +453,18 @@ pub fn is_unsupported_handshake_error(error: &str) -> bool {
     error.contains("Unknown method: handshake")
         || error.contains("Method not found: handshake")
         || error.contains("method not found: handshake")
+}
+
+pub fn mongo_database_params(database: &str) -> Value {
+    serde_json::json!({ "database": database })
+}
+
+pub fn mongo_collection_params(database: &str, collection: &str) -> Value {
+    serde_json::json!({ "database": database, "collection": collection })
+}
+
+pub fn mongo_document_id_params(database: &str, collection: &str, id: &str) -> Value {
+    serde_json::json!({ "database": database, "collection": collection, "id": id })
 }
 
 fn agent_java_args(jar_path: &str) -> Vec<String> {
@@ -493,8 +575,9 @@ impl Drop for AgentDriverClient {
 mod tests {
     use super::{
         agent_handshake_params, agent_java_args, agent_proxy_env_vars, format_agent_process_error,
-        is_unsupported_handshake_error, read_agent_line, AgentCapability, AgentDriverClient, AgentHandshake,
-        AgentMethod, StderrTail, AGENT_PROTOCOL_VERSION,
+        is_unsupported_handshake_error, mongo_collection_params, mongo_database_params, mongo_document_id_params,
+        read_agent_line, AgentCapability, AgentDriverClient, AgentHandshake, AgentMethod, MongoAgentMethod, StderrTail,
+        AGENT_PROTOCOL_VERSION,
     };
     use std::io::Cursor;
 
@@ -616,12 +699,45 @@ mod tests {
     }
 
     #[test]
+    fn defines_mongo_agent_protocol_methods() {
+        assert_eq!(MongoAgentMethod::ListDatabases.as_str(), "list_databases");
+        assert_eq!(MongoAgentMethod::ListCollections.as_str(), "list_collections");
+        assert_eq!(MongoAgentMethod::FindDocuments.as_str(), "find_documents");
+        assert_eq!(MongoAgentMethod::InsertDocument.as_str(), "insert_document");
+        assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
+        assert_eq!(MongoAgentMethod::DeleteDocument.as_str(), "delete_document");
+    }
+
+    #[test]
     fn exposes_schema_and_query_protocol_wrappers() {
         let _list_databases = AgentDriverClient::list_databases::<serde_json::Value>;
         let _list_schemas = AgentDriverClient::list_schemas::<serde_json::Value>;
         let _execute_query = AgentDriverClient::execute_query::<serde_json::Value>;
         let _execute_query_page = AgentDriverClient::execute_query_page::<serde_json::Value>;
         let _fetch_query_page = AgentDriverClient::fetch_query_page::<serde_json::Value>;
+    }
+
+    #[test]
+    fn exposes_mongo_protocol_wrappers() {
+        let _mongo_list_databases = AgentDriverClient::mongo_list_databases::<serde_json::Value>;
+        let _mongo_list_collections = AgentDriverClient::mongo_list_collections::<serde_json::Value>;
+        let _mongo_find_documents = AgentDriverClient::mongo_find_documents::<serde_json::Value>;
+        let _mongo_insert_document = AgentDriverClient::mongo_insert_document::<serde_json::Value>;
+        let _mongo_update_document = AgentDriverClient::mongo_update_document::<serde_json::Value>;
+        let _mongo_delete_document = AgentDriverClient::mongo_delete_document::<serde_json::Value>;
+    }
+
+    #[test]
+    fn builds_mongo_agent_request_params() {
+        assert_eq!(mongo_database_params("app"), serde_json::json!({ "database": "app" }));
+        assert_eq!(
+            mongo_collection_params("app", "orders"),
+            serde_json::json!({ "database": "app", "collection": "orders" })
+        );
+        assert_eq!(
+            mongo_document_id_params("app", "orders", "abc"),
+            serde_json::json!({ "database": "app", "collection": "orders", "id": "abc" })
+        );
     }
 
     #[test]

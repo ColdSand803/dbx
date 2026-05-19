@@ -1,4 +1,5 @@
 use crate::connection::{AppState, PoolKind};
+use crate::db::agent_driver::mongo_document_id_params;
 use crate::db::elasticsearch_driver;
 use crate::db::mongo_driver::{self, MongoDocumentResult};
 
@@ -9,7 +10,7 @@ pub async fn mongo_list_databases_core(state: &AppState, connection_id: &str) ->
         PoolKind::Elasticsearch(_) => Ok(vec!["default".to_string()]),
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
-            let result: Vec<serde_json::Value> = client.call("list_databases", serde_json::json!({})).await?;
+            let result: Vec<serde_json::Value> = client.mongo_list_databases().await?;
             Ok(result.iter().filter_map(|v| v.get("name")?.as_str().map(String::from)).collect())
         }
         _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
@@ -27,7 +28,7 @@ pub async fn mongo_list_collections_core(
         PoolKind::Elasticsearch(client) => elasticsearch_driver::list_indices(client).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
-            client.call("list_collections", serde_json::json!({ "database": database })).await
+            client.mongo_list_collections(database).await
         }
         _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
     }
@@ -56,17 +57,14 @@ pub async fn mongo_find_documents_core(
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             client
-                .call(
-                    "find_documents",
-                    serde_json::json!({
-                        "database": database,
-                        "collection": collection,
-                        "skip": skip,
-                        "limit": limit,
-                        "filter": filter,
-                        "sort": sort,
-                    }),
-                )
+                .mongo_find_documents(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "skip": skip,
+                    "limit": limit,
+                    "filter": filter,
+                    "sort": sort,
+                }))
                 .await
         }
         _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
@@ -91,14 +89,11 @@ pub async fn mongo_insert_document_core(
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let result: serde_json::Value = client
-                .call(
-                    "insert_document",
-                    serde_json::json!({
-                        "database": database,
-                        "collection": collection,
-                        "doc_json": doc_json,
-                    }),
-                )
+                .mongo_insert_document(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "doc_json": doc_json,
+                }))
                 .await?;
             Ok(result.get("inserted_id").and_then(|v| v.as_str()).unwrap_or("").to_string())
         }
@@ -125,15 +120,12 @@ pub async fn mongo_update_document_core(
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
             let result: serde_json::Value = client
-                .call(
-                    "update_document",
-                    serde_json::json!({
-                        "database": database,
-                        "collection": collection,
-                        "id": id,
-                        "doc_json": doc_json,
-                    }),
-                )
+                .mongo_update_document(serde_json::json!({
+                    "database": database,
+                    "collection": collection,
+                    "id": id,
+                    "doc_json": doc_json,
+                }))
                 .await?;
             Ok(result.get("modified_count").and_then(|v| v.as_u64()).unwrap_or(0))
         }
@@ -158,16 +150,8 @@ pub async fn mongo_delete_document_core(
         }
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
-            let result: serde_json::Value = client
-                .call(
-                    "delete_document",
-                    serde_json::json!({
-                        "database": database,
-                        "collection": collection,
-                        "id": id,
-                    }),
-                )
-                .await?;
+            let result: serde_json::Value =
+                client.mongo_delete_document(mongo_document_id_params(database, collection, id)).await?;
             Ok(result.get("deleted_count").and_then(|v| v.as_u64()).unwrap_or(0))
         }
         _ => Err("Not a MongoDB/Elasticsearch connection".to_string()),
