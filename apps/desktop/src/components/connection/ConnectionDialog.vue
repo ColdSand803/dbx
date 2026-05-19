@@ -241,6 +241,7 @@ const driverProfiles: Record<
 
 function profileForConfig(config: ConnectionConfig) {
   if (config.driver_profile && driverProfiles[config.driver_profile]) return config.driver_profile;
+  if (config.db_type === "dameng") return "dm";
   return config.db_type;
 }
 
@@ -336,6 +337,7 @@ watch(
     }
     resetTestState();
   },
+  { immediate: true },
 );
 
 const isEditing = ref(false);

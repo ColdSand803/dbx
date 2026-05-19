@@ -70,6 +70,7 @@ const editConfig = computed(() => {
   if (!id) return undefined;
   return connectionStore.getConfig(id);
 });
+const shouldShowConnectionDialog = computed(() => props.showConnectionDialog || !!editConfig.value);
 
 watch(editConfig, (v) => {
   if (v) emit("update:showConnectionDialog", true);
@@ -95,8 +96,8 @@ watch(
 
 <template>
   <ConnectionDialog
-    v-if="showConnectionDialog || editConfig"
-    :open="showConnectionDialog"
+    v-if="shouldShowConnectionDialog"
+    :open="shouldShowConnectionDialog"
     :edit-config="editConfig"
     @update:open="emit('update:showConnectionDialog', $event)"
     @connect-started="emit('connectStarted', $event)"

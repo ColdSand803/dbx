@@ -24,7 +24,11 @@ test("app dialogs keep non-primary dialogs out of the startup chunk", () => {
 });
 
 test("app dialogs only render async dialogs when their open state needs them", () => {
-  assert.match(appDialogsSource, /<ConnectionDialog\s+v-if="showConnectionDialog \|\| editConfig"/);
+  assert.match(
+    appDialogsSource,
+    /const shouldShowConnectionDialog = computed\(\(\) => props\.showConnectionDialog \|\| !!editConfig\.value\)/,
+  );
+  assert.match(appDialogsSource, /<ConnectionDialog\s+v-if="shouldShowConnectionDialog"/);
   assert.match(appDialogsSource, /<EditorSettingsDialog\s+v-if="showSettingsDialog"/);
   assert.match(appDialogsSource, /<DangerConfirmDialog\s+v-if="showDangerDialog"/);
   assert.match(appDialogsSource, /<DataTransferDialog\s+v-if="dialogs\.showTransferDialog\.value"/);
