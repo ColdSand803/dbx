@@ -10,6 +10,7 @@ import {
   isObjectSourceSaveShortcutTarget,
   isRefreshDataShortcut,
   isSaveShortcut,
+  isToggleTransposeShortcut,
 } from "../../apps/desktop/src/lib/keyboardShortcuts.ts";
 import { shortcutToCodeMirrorKey } from "../../apps/desktop/src/lib/shortcutRegistry.ts";
 
@@ -83,6 +84,12 @@ test("matches Cmd+F for focusing search", () => {
 
 test("matches F5 for refreshing data", () => {
   assert.equal(isRefreshDataShortcut({ key: "F5" }), true);
+});
+
+test("matches configurable shortcut for toggling transpose view", () => {
+  assert.equal(isToggleTransposeShortcut({ key: "Tab" }), true);
+  assert.equal(isToggleTransposeShortcut({ key: "Tab" }, { toggleTranspose: "Alt+T" } as any), false);
+  assert.equal(isToggleTransposeShortcut({ key: "t", altKey: true }, { toggleTranspose: "Alt+T" } as any), true);
 });
 
 test("matches custom shortcut settings for refreshing data", () => {

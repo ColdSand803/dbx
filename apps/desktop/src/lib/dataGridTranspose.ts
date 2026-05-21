@@ -16,11 +16,27 @@ export interface DataGridTransposeCell<T> {
   isNull: boolean;
 }
 
+export interface DataGridVisibleTransposeCell<T> extends DataGridTransposeCell<T> {
+  recordIndex: number;
+}
+
 export interface DataGridTransposeRow<T> {
   id: string;
   column: string;
   type: string;
   values: Array<DataGridTransposeCell<T>>;
+}
+
+export interface DataGridVisibleTransposeRow<T> {
+  id: string;
+  column: string;
+  type: string;
+  values: Array<DataGridVisibleTransposeCell<T>>;
+}
+
+export interface BuildVisibleTransposeRowsOptions<T> extends BuildTransposeRowsOptions<T> {
+  recordIndexes: number[];
+  valueIndexes?: number[];
 }
 
 export interface TransposeRecordWindowOptions {
@@ -58,6 +74,8 @@ export interface ContextTransposeStateOptions extends TransposeAnchorOptions {
   transposeRowIndex: number | null;
 }
 
+export type KeyboardTransposeStateOptions = ContextTransposeStateOptions;
+
 export interface TransposeFieldWidthOptions {
   minWidth?: number;
   maxWidth?: number;
@@ -89,6 +107,14 @@ export function nextContextTransposeState(options: ContextTransposeStateOptions)
   return nextTransposeState(options.showTranspose, options.transposeRowIndex, anchorRowIndex);
 }
 
+export function nextKeyboardTransposeState(options: KeyboardTransposeStateOptions): DataGridTransposeState {
+  if (options.showTranspose) return { showTranspose: false, transposeRowIndex: null };
+  if (options.rowIds.length === 0) return { showTranspose: false, transposeRowIndex: null };
+  const requestedRowIndex = Math.max(0, Math.min(options.rowIds.length - 1, options.requestedRowIndex));
+  const anchorRowIndex = transposeAnchorRowIndex({ ...options, requestedRowIndex });
+  return { showTranspose: true, transposeRowIndex: anchorRowIndex };
+}
+
 export function buildTransposeRows<T>(options: BuildTransposeRowsOptions<T>): Array<DataGridTransposeRow<T>> {
   return options.columns.map((column, columnIndex) => {
     return {
@@ -102,6 +128,32 @@ export function buildTransposeRows<T>(options: BuildTransposeRowsOptions<T>): Ar
           display: options.displayValue(value, column, columnIndex, recordIndex),
           isNull: value === null,
         };
+      }),
+    };
+  });
+}
+
+export function buildVisibleTransposeRows<T>(
+  options: BuildVisibleTransposeRowsOptions<T>,
+): Array<DataGridVisibleTransposeRow<T>> {
+  return options.columns.map((column, columnIndex) => {
+    return {
+      id: `${columnIndex}:${column}`,
+      column,
+      type: options.typeByColumn?.get(column) || "",
+      values: options.recordIndexes.flatMap((recordIndex) => {
+        const record = options.records[recordIndex];
+        if (!record) return [];
+        const valueIndex = options.valueIndexes?.[columnIndex] ?? columnIndex;
+        const value = record[valueIndex] as T;
+        return [
+          {
+            recordIndex,
+            value,
+            display: options.displayValue(value, column, columnIndex, recordIndex),
+            isNull: value === null,
+          },
+        ];
       }),
     };
   });

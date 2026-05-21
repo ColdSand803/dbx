@@ -647,7 +647,7 @@ watch(
         </nav>
 
         <div class="min-w-0 flex-1 overflow-hidden px-1 flex flex-col">
-          <div class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1">
+          <div class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1 pr-2">
             <section v-if="activeSettingsTab === 'editor'" class="flex flex-col gap-5 py-2">
               <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px]">
                 <!-- Font Family -->
@@ -847,7 +847,7 @@ watch(
                 <textarea
                   id="sidebar-hidden-table-prefixes"
                   v-model="editSidebarHiddenTablePrefixes"
-                  class="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  class="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                   :placeholder="t('settings.sidebarHiddenTablePrefixesPlaceholder')"
                 />
                 <p class="text-xs text-muted-foreground">

@@ -3,6 +3,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 
 const source = readFileSync("apps/desktop/src/components/editor/EditorSettingsDialog.vue", "utf8");
+const shortcutSource = readFileSync("apps/desktop/src/lib/shortcutRegistry.ts", "utf8");
 
 test("settings dialog uses a side category navigation", () => {
   assert.match(source, /settingsCategoryNav/);
@@ -34,6 +35,7 @@ test("settings dialog has a shortcuts category", () => {
   assert.match(source, /value: "shortcuts"/);
   assert.match(source, /activeSettingsTab === ['"]shortcuts['"]/);
   assert.match(source, /SHORTCUT_DEFINITIONS/);
+  assert.match(shortcutSource, /settings\.shortcutToggleTranspose/);
 });
 
 test("shortcut settings capture custom keydown input instead of fixed select options", () => {
@@ -48,6 +50,7 @@ test("settings dialog exposes sidebar activation in navigation settings", () => 
   assert.match(source, /settings\.sidebarActivation/);
   assert.match(source, /settings\.sidebarHiddenTablePrefixes/);
   assert.match(source, /editSidebarHiddenTablePrefixes/);
+  assert.match(source, /focus-visible:ring-inset/);
 });
 
 test("AI settings can browse provider model names while keeping manual input", () => {

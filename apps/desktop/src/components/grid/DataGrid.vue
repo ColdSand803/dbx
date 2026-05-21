@@ -90,8 +90,9 @@ import {
 } from "@/lib/tableEditing";
 import { formatGridSqlLiteral } from "@/lib/dataGridSql";
 import {
-  buildTransposeRows,
+  buildVisibleTransposeRows,
   nextContextTransposeState,
+  nextKeyboardTransposeState,
   nextTransposeState,
   transposeFieldWidth,
   transposeScrollLeftForRecord,
@@ -118,7 +119,7 @@ import {
   type DateTimeFormatterUnit,
 } from "@/lib/columnFormatter";
 import { temporalCellEditorKind, type TemporalCellEditorKind } from "@/lib/dataGridTemporalEditor";
-import { isCancelSearchShortcut, isFocusSearchShortcut } from "@/lib/keyboardShortcuts";
+import { isCancelSearchShortcut, isFocusSearchShortcut, isToggleTransposeShortcut } from "@/lib/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGridScrollGutter";
 import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGridSaveUi";
 import { appendColumnValueFilterCondition, buildColumnValueFilterCondition } from "@/lib/dataGridColumnFilter";
@@ -2258,6 +2259,33 @@ function scrollCellIntoView(rowIndex: number, colIndex: number) {
   });
 }
 
+function currentTransposeRequestedRowIndex(): number {
+  const position = currentSelectedCellPosition();
+  if (position) return position.rowIndex;
+  if (transposeRowIndex.value !== null) return transposeRowIndex.value;
+  return 0;
+}
+
+function toggleKeyboardTranspose(): boolean {
+  if (displayItems.value.length === 0) return false;
+  const next = nextKeyboardTransposeState({
+    showTranspose: showTranspose.value,
+    transposeRowIndex: transposeRowIndex.value,
+    requestedRowIndex: currentTransposeRequestedRowIndex(),
+    rowIds: displayItems.value.map((item) => item.id),
+    selectedRowIds: selectedRowIds.value,
+    selectedRange: selectedRange.value,
+  });
+  showTranspose.value = next.showTranspose;
+  transposeRowIndex.value = next.transposeRowIndex;
+  if (next.showTranspose) {
+    closeCellDetails();
+    nextTick(updateTransposeViewport);
+    if (next.transposeRowIndex !== null) scrollTransposeRecordIntoView(next.transposeRowIndex);
+  }
+  return true;
+}
+
 function moveSelectedCell(rowDelta: number, colDelta: number): boolean {
   const position = currentSelectedCellPosition();
   if (!position || editingCell.value || displayItems.value.length === 0 || visibleColumnIndexes.value.length === 0)
@@ -2293,6 +2321,10 @@ async function onGridKeydown(event: KeyboardEvent) {
     return;
   }
   if (eventTargetAllowsNativeClipboard(event)) return;
+  if (isToggleTransposeShortcut(event, settingsStore.editorSettings.shortcuts) && toggleKeyboardTranspose()) {
+    event.preventDefault();
+    return;
+  }
   if (event.key === "ArrowLeft" && moveTransposeRecordSelection(-1)) {
     event.preventDefault();
     return;
@@ -2375,15 +2407,6 @@ const transposePinnedWidth = computed(
   () => transposePinnedWidthOverride.value ?? transposeFieldWidth(visibleColumns.value),
 );
 
-const transposeRows = computed(() => {
-  return buildTransposeRows({
-    columns: visibleColumns.value,
-    records: displayItems.value.map((item) => visibleColumnIndexes.value.map((columnIndex) => item.data[columnIndex])),
-    typeByColumn: columnTypeMap.value,
-    displayValue: (value, _column, index) => formatCell(value, visibleColumnIndexes.value[index]),
-  });
-});
-const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
 const transposeRecordWindow = computed(() =>
   visibleTransposeRecordWindow({
     totalRecords: displayItems.value.length,
@@ -2398,6 +2421,17 @@ const visibleTransposeRecordIndexes = computed(() => {
   const window = transposeRecordWindow.value;
   return Array.from({ length: window.end - window.start }, (_, offset) => window.start + offset);
 });
+const transposeRows = computed(() => {
+  return buildVisibleTransposeRows({
+    columns: visibleColumns.value,
+    records: displayItems.value.map((item) => item.data),
+    recordIndexes: visibleTransposeRecordIndexes.value,
+    valueIndexes: visibleColumnIndexes.value,
+    typeByColumn: columnTypeMap.value,
+    displayValue: (value, _column, index) => formatCell(value, visibleColumnIndexes.value[index]),
+  });
+});
+const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
 const transposeTotalWidth = computed(
   () => transposePinnedWidth.value + displayItems.value.length * transposeRecordWidth.value,
 );
@@ -3344,18 +3378,18 @@ defineExpose({
                       </div>
                       <div class="shrink-0" :style="{ width: `${transposeRecordWindow.beforeWidth}px` }" />
                       <div
-                        v-for="recordIndex in visibleTransposeRecordIndexes"
-                        :key="`${item.id}:${recordIndex}`"
+                        v-for="cell in item.values"
+                        :key="`${item.id}:${cell.recordIndex}`"
                         class="shrink-0 border-r border-border/70 px-2 py-1.5 font-mono truncate"
                         :class="{
-                          'text-muted-foreground italic': item.values[recordIndex]?.isNull,
-                          'bg-primary/10': recordIndex === transposeRowIndex,
+                          'text-muted-foreground italic': cell.isNull,
+                          'bg-primary/10': cell.recordIndex === transposeRowIndex,
                         }"
                         :style="{ width: `${transposeRecordWidth}px` }"
-                        :title="item.values[recordIndex]?.display"
-                        @click="selectTransposeRecord(recordIndex)"
+                        :title="cell.display"
+                        @click="selectTransposeRecord(cell.recordIndex)"
                       >
-                        {{ item.values[recordIndex]?.display }}
+                        {{ cell.display }}
                       </div>
                       <div class="shrink-0" :style="{ width: `${transposeRecordWindow.afterWidth}px` }" />
                     </div>

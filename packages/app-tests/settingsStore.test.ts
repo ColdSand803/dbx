@@ -31,6 +31,7 @@ test("defaults shortcut settings", () => {
   assert.equal(settings.shortcuts.newQuery, "Mod+T");
   assert.equal(settings.shortcuts.focusSearch, "Mod+F");
   assert.equal(settings.shortcuts.refreshData, "F5");
+  assert.equal(settings.shortcuts.toggleTranspose, "Tab");
 });
 
 test("keeps saved shortcut overrides", () => {
