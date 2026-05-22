@@ -31,6 +31,7 @@ test("mysql-like databases expose index rebuild and type capabilities", () => {
     assert.equal(caps.dropIndex, true);
     assert.equal(caps.rebuildIndex, true);
     assert.equal(caps.indexType, true);
+    assert.equal(caps.reorderColumn, true);
     assert.equal(canEditTableStructure(dbType), true);
   }
 });
@@ -79,6 +80,7 @@ test("limited analytic engines can open the editor for supported operations only
   assert.equal(clickhouse.alterType, true);
   assert.equal(clickhouse.alterNullability, true);
   assert.equal(clickhouse.alterDefault, true);
+  assert.equal(clickhouse.reorderColumn, true);
   assert.equal(clickhouse.comment, true);
   assert.equal(clickhouse.createIndex, false);
   assert.equal(clickhouse.rebuildIndex, false);

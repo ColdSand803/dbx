@@ -846,6 +846,8 @@ export default {
     drop: "Drop",
     restore: "Restore",
     remove: "Remove",
+    moveColumnUp: "Move column up",
+    moveColumnDown: "Move column down",
     yes: "Yes",
     no: "No",
     emptyReadonly: "No records",

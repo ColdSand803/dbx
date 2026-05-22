@@ -37,70 +37,79 @@ const indexes: IndexInfo[] = [
 test("creates editable column drafts from column metadata", () => {
   const drafts = createColumnDrafts(columns);
 
-  assert.deepEqual(drafts.map((draft) => ({
-    id: draft.id,
-    name: draft.name,
-    dataType: draft.dataType,
-    isNullable: draft.isNullable,
-    defaultValue: draft.defaultValue,
-    comment: draft.comment,
-    isPrimaryKey: draft.isPrimaryKey,
-    markedForDrop: draft.markedForDrop,
-    originalName: draft.original?.name,
-  })), [
-    {
-      id: "existing:id",
-      name: "id",
-      dataType: "bigint",
-      isNullable: false,
-      defaultValue: "",
-      comment: "identifier",
-      isPrimaryKey: true,
-      markedForDrop: false,
-      originalName: "id",
-    },
-    {
-      id: "existing:name",
-      name: "name",
-      dataType: "varchar(120)",
-      isNullable: true,
-      defaultValue: "'guest'",
-      comment: "",
-      isPrimaryKey: false,
-      markedForDrop: false,
-      originalName: "name",
-    },
-  ]);
+  assert.deepEqual(
+    drafts.map((draft) => ({
+      id: draft.id,
+      name: draft.name,
+      dataType: draft.dataType,
+      isNullable: draft.isNullable,
+      defaultValue: draft.defaultValue,
+      comment: draft.comment,
+      isPrimaryKey: draft.isPrimaryKey,
+      originalPosition: draft.originalPosition,
+      markedForDrop: draft.markedForDrop,
+      originalName: draft.original?.name,
+    })),
+    [
+      {
+        id: "existing:id",
+        name: "id",
+        dataType: "bigint",
+        isNullable: false,
+        defaultValue: "",
+        comment: "identifier",
+        isPrimaryKey: true,
+        originalPosition: 0,
+        markedForDrop: false,
+        originalName: "id",
+      },
+      {
+        id: "existing:name",
+        name: "name",
+        dataType: "varchar(120)",
+        isNullable: true,
+        defaultValue: "'guest'",
+        comment: "",
+        isPrimaryKey: false,
+        originalPosition: 1,
+        markedForDrop: false,
+        originalName: "name",
+      },
+    ],
+  );
 });
 
 test("creates editable index drafts and splits pasted column lists", () => {
   const drafts = createIndexDrafts(indexes);
 
-  assert.deepEqual(drafts.map((draft) => ({
-    id: draft.id,
-    name: draft.name,
-    columns: draft.columns,
-    isUnique: draft.isUnique,
-    isPrimary: draft.isPrimary,
-    originalName: draft.original?.name,
-  })), [
-    {
-      id: "existing:PRIMARY",
-      name: "PRIMARY",
-      columns: ["id"],
-      isUnique: true,
-      isPrimary: true,
-      originalName: "PRIMARY",
-    },
-    {
-      id: "existing:idx_name",
-      name: "idx_name",
-      columns: ["name"],
-      isUnique: false,
-      isPrimary: false,
-      originalName: "idx_name",
-    },
-  ]);
+  assert.deepEqual(
+    drafts.map((draft) => ({
+      id: draft.id,
+      name: draft.name,
+      columns: draft.columns,
+      isUnique: draft.isUnique,
+      isPrimary: draft.isPrimary,
+      originalName: draft.original?.name,
+    })),
+    [
+      {
+        id: "existing:PRIMARY",
+        name: "PRIMARY",
+        columns: ["id"],
+        isUnique: true,
+        isPrimary: true,
+        originalName: "PRIMARY",
+      },
+      {
+        id: "existing:idx_name",
+        name: "idx_name",
+        columns: ["name"],
+        isUnique: false,
+        isPrimary: false,
+        originalName: "idx_name",
+      },
+    ],
+  );
   assert.equal(toColumnNames(["id", "name"]), "id, name");
 });
 

@@ -827,6 +827,8 @@ export default {
     drop: "删除",
     restore: "恢复",
     remove: "移除",
+    moveColumnUp: "上移字段",
+    moveColumnDown: "下移字段",
     yes: "是",
     no: "否",
     emptyReadonly: "暂无记录",

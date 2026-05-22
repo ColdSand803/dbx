@@ -17,6 +17,7 @@ function column(overrides: Partial<EditableStructureColumn>): EditableStructureC
     comment: overrides.comment ?? "",
     isPrimaryKey: overrides.isPrimaryKey ?? false,
     original: overrides.original,
+    originalPosition: overrides.originalPosition,
     markedForDrop: overrides.markedForDrop ?? false,
   };
 }
@@ -92,6 +93,66 @@ test("builds MySQL column and index change statements", () => {
     "ALTER TABLE `users` DROP COLUMN `legacy`;",
     "DROP INDEX `idx_old` ON `users`;",
     "CREATE UNIQUE INDEX `uniq_users_email` ON `users` (`email`);",
+  ]);
+});
+
+test("builds MySQL column reorder statements", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "mysql",
+    tableName: "users",
+    columns: [
+      column({
+        id: "id",
+        name: "id",
+        dataType: "int",
+        isNullable: false,
+        isPrimaryKey: true,
+        originalPosition: 0,
+        original: {
+          name: "id",
+          data_type: "int",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: true,
+          extra: null,
+        },
+      }),
+      column({
+        id: "email",
+        name: "email",
+        dataType: "varchar(255)",
+        originalPosition: 2,
+        original: {
+          name: "email",
+          data_type: "varchar(255)",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+      }),
+      column({
+        id: "name",
+        name: "display_name",
+        dataType: "varchar(120)",
+        originalPosition: 1,
+        original: {
+          name: "name",
+          data_type: "varchar(80)",
+          is_nullable: true,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+      }),
+    ],
+    indexes: [],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    "ALTER TABLE `users` MODIFY COLUMN `email` varchar(255) AFTER `id`;",
+    "ALTER TABLE `users` CHANGE COLUMN `name` `display_name` varchar(120) AFTER `email`;",
   ]);
 });
 
@@ -820,6 +881,52 @@ test("builds ClickHouse nullable and comment column changes", () => {
     'ALTER TABLE "events" MODIFY COLUMN "status" REMOVE DEFAULT;',
     'ALTER TABLE "events" MODIFY COLUMN "status" String;',
     'ALTER TABLE "events" COMMENT COLUMN "status" \'current status\';',
+  ]);
+});
+
+test("builds ClickHouse column reorder statements", () => {
+  const result = buildTableStructureChangeSql({
+    databaseType: "clickhouse",
+    tableName: "events",
+    columns: [
+      column({
+        id: "event_type",
+        name: "event_type",
+        dataType: "String",
+        isNullable: false,
+        originalPosition: 1,
+        original: {
+          name: "event_type",
+          data_type: "String",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+      }),
+      column({
+        id: "ts",
+        name: "ts",
+        dataType: "DateTime",
+        isNullable: false,
+        originalPosition: 0,
+        original: {
+          name: "ts",
+          data_type: "DateTime",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+      }),
+    ],
+    indexes: [],
+  });
+
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.statements, [
+    'ALTER TABLE "events" MODIFY COLUMN "event_type" String FIRST;',
+    'ALTER TABLE "events" MODIFY COLUMN "ts" DateTime AFTER "event_type";',
   ]);
 });
 

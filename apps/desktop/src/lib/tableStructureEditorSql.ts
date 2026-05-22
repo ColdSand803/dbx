@@ -10,6 +10,7 @@ export interface EditableStructureColumn {
   comment: string;
   isPrimaryKey: boolean;
   original?: ColumnInfo;
+  originalPosition?: number;
   markedForDrop: boolean;
 }
 
@@ -130,12 +131,17 @@ function hasExistingColumnAttributeChange(column: EditableStructureColumn): bool
   );
 }
 
-function buildAddColumnSql(databaseType: StructureSqlFlavor, table: string, column: EditableStructureColumn): string[] {
+function buildAddColumnSql(
+  databaseType: StructureSqlFlavor,
+  table: string,
+  column: EditableStructureColumn,
+  positionClause = "",
+): string[] {
   const addKeyword = databaseType === "sqlserver" ? "ADD" : "ADD COLUMN";
   const definition = columnDefinition(databaseType, column);
   const statements = isOracleLike(databaseType)
     ? [`ALTER TABLE ${table} ADD (${definition});`]
-    : [`ALTER TABLE ${table} ${addKeyword} ${definition};`];
+    : [`ALTER TABLE ${table} ${addKeyword} ${definition}${positionClause};`];
   if ((databaseType === "postgres" || isOracleLike(databaseType)) && clean(column.comment)) {
     statements.push(
       `COMMENT ON COLUMN ${table}.${quoteIdent(databaseType, column.name)} IS ${quoteString(clean(column.comment))};`,
@@ -185,13 +191,13 @@ function buildOracleLikeExistingColumnSql(
   return statements;
 }
 
-function buildMysqlExistingColumnSql(table: string, column: EditableStructureColumn): string[] {
+function buildMysqlExistingColumnSql(table: string, column: EditableStructureColumn, positionClause = ""): string[] {
   const originalName = column.original?.name ?? column.name;
   const operation =
     column.name === originalName
       ? `MODIFY COLUMN ${columnDefinition("mysql", column)}`
       : `CHANGE COLUMN ${quoteIdent("mysql", originalName)} ${columnDefinition("mysql", column)}`;
-  return [`ALTER TABLE ${table} ${operation};`];
+  return [`ALTER TABLE ${table} ${operation}${positionClause};`];
 }
 
 function buildPostgresExistingColumnSql(table: string, column: EditableStructureColumn): string[] {
@@ -259,7 +265,11 @@ function buildH2ExistingColumnSql(table: string, column: EditableStructureColumn
   return statements;
 }
 
-function buildClickHouseExistingColumnSql(table: string, column: EditableStructureColumn): string[] {
+function buildClickHouseExistingColumnSql(
+  table: string,
+  column: EditableStructureColumn,
+  positionClause = "",
+): string[] {
   const original = column.original;
   if (!original) return [];
 
@@ -278,20 +288,28 @@ function buildClickHouseExistingColumnSql(table: string, column: EditableStructu
     const defaultValue = normalizeDefault(column.defaultValue);
     if (defaultValue) {
       statements.push(
-        `ALTER TABLE ${table} MODIFY COLUMN ${quoteIdent("clickhouse", currentName)} ${clickHouseColumnType(column)} DEFAULT ${defaultValue};`,
+        `ALTER TABLE ${table} MODIFY COLUMN ${quoteIdent("clickhouse", currentName)} ${clickHouseColumnType(column)} DEFAULT ${defaultValue}${positionClause};`,
       );
     } else if (originalDefault(column)) {
       statements.push(`ALTER TABLE ${table} MODIFY COLUMN ${quoteIdent("clickhouse", currentName)} REMOVE DEFAULT;`);
       if (clickHouseColumnType(column) !== original.data_type.trim()) {
         statements.push(
-          `ALTER TABLE ${table} MODIFY COLUMN ${quoteIdent("clickhouse", currentName)} ${clickHouseColumnType(column)};`,
+          `ALTER TABLE ${table} MODIFY COLUMN ${quoteIdent("clickhouse", currentName)} ${clickHouseColumnType(column)}${positionClause};`,
+        );
+      } else if (positionClause) {
+        statements.push(
+          `ALTER TABLE ${table} MODIFY COLUMN ${quoteIdent("clickhouse", currentName)} ${clickHouseColumnType(column)}${positionClause};`,
         );
       }
     } else {
       statements.push(
-        `ALTER TABLE ${table} MODIFY COLUMN ${quoteIdent("clickhouse", currentName)} ${clickHouseColumnType(column)};`,
+        `ALTER TABLE ${table} MODIFY COLUMN ${quoteIdent("clickhouse", currentName)} ${clickHouseColumnType(column)}${positionClause};`,
       );
     }
+  } else if (positionClause) {
+    statements.push(
+      `ALTER TABLE ${table} MODIFY COLUMN ${quoteIdent("clickhouse", currentName)} ${clickHouseColumnType(column)}${positionClause};`,
+    );
   }
   if (clean(column.comment) !== originalComment(column)) {
     statements.push(
@@ -322,6 +340,41 @@ function buildSqliteExistingColumnSql(table: string, column: EditableStructureCo
   return statements;
 }
 
+function columnPositionClause(
+  dialect: TableStructureDialect,
+  columns: EditableStructureColumn[],
+  index: number,
+): string {
+  if (dialect !== "mysql" && dialect !== "clickhouse") return "";
+  if (index <= 0) return " FIRST";
+  return ` AFTER ${quoteIdent(dialect, columns[index - 1]?.name ?? "")}`;
+}
+
+function originalPreviousColumnName(
+  columns: EditableStructureColumn[],
+  column: EditableStructureColumn,
+): string | null {
+  if (!column.original || typeof column.originalPosition !== "number") return null;
+  const originalColumns = columns
+    .filter((item) => item.original && typeof item.originalPosition === "number")
+    .sort((a, b) => (a.originalPosition ?? 0) - (b.originalPosition ?? 0));
+  const index = originalColumns.findIndex((item) => item.id === column.id);
+  if (index < 0) return null;
+  return index === 0 ? null : (originalColumns[index - 1]?.original?.name ?? null);
+}
+
+function currentPreviousOriginalColumnName(columns: EditableStructureColumn[], index: number): string | null {
+  if (index <= 0) return null;
+  const previous = columns[index - 1];
+  return previous?.original?.name ?? previous?.name ?? null;
+}
+
+function mysqlColumnPositionChanged(columns: EditableStructureColumn[], index: number): boolean {
+  const column = columns[index];
+  if (!column?.original || typeof column.originalPosition !== "number") return false;
+  return currentPreviousOriginalColumnName(columns, index) !== originalPreviousColumnName(columns, column);
+}
+
 function buildColumnSql(options: BuildTableStructureChangeSqlOptions, warnings: string[]): string[] {
   const databaseType = options.databaseType;
   const capabilities = getTableStructureCapabilities(databaseType);
@@ -329,6 +382,8 @@ function buildColumnSql(options: BuildTableStructureChangeSqlOptions, warnings: 
   const table = qualifiedTable(dialect, options.schema, options.tableName);
   const statements: string[] = [];
   const databaseLabel = databaseType ?? "this database";
+  const activeColumns = options.columns.filter((column) => !column.markedForDrop);
+  const hasOriginalColumnPositions = activeColumns.some((column) => typeof column.originalPosition === "number");
 
   for (const column of options.columns) {
     if (column.markedForDrop) {
@@ -345,16 +400,24 @@ function buildColumnSql(options: BuildTableStructureChangeSqlOptions, warnings: 
       continue;
     }
 
+    const activeIndex = activeColumns.indexOf(column);
+    const positionClause = hasOriginalColumnPositions ? columnPositionClause(dialect, activeColumns, activeIndex) : "";
+    const hasPositionChange =
+      hasOriginalColumnPositions &&
+      (dialect === "mysql" || dialect === "clickhouse") &&
+      !!column.original &&
+      mysqlColumnPositionChanged(activeColumns, activeIndex);
+
     if (!column.original) {
       if (!capabilities.addColumn) {
         warnings.push(`Adding columns is not supported for ${databaseLabel} from this editor.`);
         continue;
       }
-      statements.push(...buildAddColumnSql(dialect, table, column));
+      statements.push(...buildAddColumnSql(dialect, table, column, positionClause));
       continue;
     }
 
-    if (!hasExistingColumnAttributeChange(column)) continue;
+    if (!hasExistingColumnAttributeChange(column) && !hasPositionChange) continue;
     const original = column.original;
     const hasRename = column.name !== original.name;
     const hasAttributeChange =
@@ -362,6 +425,9 @@ function buildColumnSql(options: BuildTableStructureChangeSqlOptions, warnings: 
       column.isNullable !== original.is_nullable ||
       normalizeDefault(column.defaultValue) !== originalDefault(column) ||
       clean(column.comment) !== originalComment(column);
+    if (hasPositionChange && !capabilities.reorderColumn) {
+      warnings.push(`Reordering columns is not supported for ${databaseLabel} from this editor.`);
+    }
     if (hasRename && !capabilities.renameColumn) {
       warnings.push(`Renaming columns is not supported for ${databaseLabel} from this editor.`);
     }
@@ -369,13 +435,14 @@ function buildColumnSql(options: BuildTableStructureChangeSqlOptions, warnings: 
       warnings.push(`Editing existing columns is not supported for ${databaseLabel} yet.`);
     }
     if (
+      (hasPositionChange && !capabilities.reorderColumn) ||
       (hasRename && !capabilities.renameColumn) ||
       (hasAttributeChange && !capabilities.alterExistingColumn && dialect !== "sqlite")
     ) {
       continue;
     }
     if (dialect === "mysql") {
-      statements.push(...buildMysqlExistingColumnSql(table, column));
+      statements.push(...buildMysqlExistingColumnSql(table, column, hasPositionChange ? positionClause : ""));
     } else if (dialect === "postgres") {
       statements.push(...buildPostgresExistingColumnSql(table, column));
     } else if (dialect === "oracle") {
@@ -383,7 +450,7 @@ function buildColumnSql(options: BuildTableStructureChangeSqlOptions, warnings: 
     } else if (dialect === "h2") {
       statements.push(...buildH2ExistingColumnSql(table, column));
     } else if (dialect === "clickhouse") {
-      statements.push(...buildClickHouseExistingColumnSql(table, column));
+      statements.push(...buildClickHouseExistingColumnSql(table, column, hasPositionChange ? positionClause : ""));
     } else if (dialect === "sqlite") {
       statements.push(...buildSqliteExistingColumnSql(table, column, warnings));
     } else {

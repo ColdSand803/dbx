@@ -42,3 +42,11 @@ test("structure editor gates controls through table structure capabilities", () 
   assert.match(source, /structureCapabilities\.value\.indexInclude/);
   assert.match(source, /structureCapabilities\.value\.indexFilter/);
 });
+
+test("structure editor exposes column order controls", () => {
+  assert.match(source, /function moveColumn/);
+  assert.match(source, /@click="moveColumn\(index, -1\)"/);
+  assert.match(source, /@click="moveColumn\(index, 1\)"/);
+  assert.match(source, /t\(['"]structureEditor\.moveColumnUp['"]\)/);
+  assert.match(source, /t\(['"]structureEditor\.moveColumnDown['"]\)/);
+});

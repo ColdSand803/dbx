@@ -2,7 +2,7 @@ import type { ColumnInfo, IndexInfo } from "../types/database.ts";
 import type { EditableStructureColumn, EditableStructureIndex } from "./tableStructureEditorSql.ts";
 
 export function createColumnDrafts(columns: ColumnInfo[]): EditableStructureColumn[] {
-  return columns.map((column) => ({
+  return columns.map((column, index) => ({
     id: `existing:${column.name}`,
     name: column.name,
     dataType: column.data_type,
@@ -11,6 +11,7 @@ export function createColumnDrafts(columns: ColumnInfo[]): EditableStructureColu
     comment: column.comment ?? "",
     isPrimaryKey: column.is_primary_key,
     original: column,
+    originalPosition: index,
     markedForDrop: false,
   }));
 }

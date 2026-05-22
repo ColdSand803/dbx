@@ -21,6 +21,7 @@ export interface TableStructureCapabilities {
   alterType: boolean;
   alterNullability: boolean;
   alterDefault: boolean;
+  reorderColumn: boolean;
   comment: boolean;
   createIndex: boolean;
   dropIndex: boolean;
@@ -41,6 +42,7 @@ const unsupportedCapabilities: TableStructureCapabilities = {
   alterType: false,
   alterNullability: false,
   alterDefault: false,
+  reorderColumn: false,
   comment: false,
   createIndex: false,
   dropIndex: false,
@@ -65,6 +67,7 @@ const mysqlCapabilities = capabilities({
   alterType: true,
   alterNullability: true,
   alterDefault: true,
+  reorderColumn: true,
   comment: true,
   createIndex: true,
   dropIndex: true,
@@ -182,6 +185,7 @@ const clickhouseCapabilities = capabilities({
   alterType: true,
   alterNullability: true,
   alterDefault: true,
+  reorderColumn: true,
   comment: true,
 });
 

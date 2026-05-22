@@ -11,6 +11,7 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
+  ChevronUp,
   Database,
   KeyRound,
   Loader2,
@@ -222,6 +223,21 @@ function addColumn() {
 
 function removeNewColumn(column: EditableStructureColumn) {
   columns.value = columns.value.filter((item) => item.id !== column.id);
+}
+
+function canMoveColumn(index: number, direction: -1 | 1): boolean {
+  const targetIndex = index + direction;
+  if (targetIndex < 0 || targetIndex >= columns.value.length) return false;
+  if (columns.value[index]?.markedForDrop || columns.value[targetIndex]?.markedForDrop) return false;
+  return isCreateMode.value || structureCapabilities.value.reorderColumn;
+}
+
+function moveColumn(index: number, direction: -1 | 1) {
+  if (!canMoveColumn(index, direction)) return;
+  const targetIndex = index + direction;
+  const [column] = columns.value.splice(index, 1);
+  if (!column) return;
+  columns.value.splice(targetIndex, 0, column);
 }
 
 function toggleDropColumn(column: EditableStructureColumn) {
@@ -455,7 +471,7 @@ watch(
                       <th class="min-w-36 border-b border-r px-2 py-2 text-left">
                         {{ t("structureEditor.comment") }}
                       </th>
-                      <th class="w-24 border-b px-2 py-2 text-left">
+                      <th class="w-40 border-b px-2 py-2 text-left">
                         {{ t("structureEditor.actions") }}
                       </th>
                     </tr>
@@ -544,21 +560,45 @@ watch(
                         </div>
                       </td>
                       <td class="border-b px-2 py-1.5">
-                        <Button
-                          v-if="column.original"
-                          variant="ghost"
-                          size="sm"
-                          class="h-7 gap-1"
-                          :disabled="!canDropColumn(column)"
-                          @click="toggleDropColumn(column)"
-                        >
-                          <Trash2 class="h-3.5 w-3.5" />
-                          {{ column.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop") }}
-                        </Button>
-                        <Button v-else variant="ghost" size="sm" class="h-7 gap-1" @click="removeNewColumn(column)">
-                          <X class="h-3.5 w-3.5" />
-                          {{ t("structureEditor.remove") }}
-                        </Button>
+                        <div class="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            class="h-7 w-7"
+                            :disabled="!canMoveColumn(index, -1)"
+                            :title="t('structureEditor.moveColumnUp')"
+                            :aria-label="t('structureEditor.moveColumnUp')"
+                            @click="moveColumn(index, -1)"
+                          >
+                            <ChevronUp class="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            class="h-7 w-7"
+                            :disabled="!canMoveColumn(index, 1)"
+                            :title="t('structureEditor.moveColumnDown')"
+                            :aria-label="t('structureEditor.moveColumnDown')"
+                            @click="moveColumn(index, 1)"
+                          >
+                            <ChevronDown class="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            v-if="column.original"
+                            variant="ghost"
+                            size="sm"
+                            class="h-7 gap-1"
+                            :disabled="!canDropColumn(column)"
+                            @click="toggleDropColumn(column)"
+                          >
+                            <Trash2 class="h-3.5 w-3.5" />
+                            {{ column.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop") }}
+                          </Button>
+                          <Button v-else variant="ghost" size="sm" class="h-7 gap-1" @click="removeNewColumn(column)">
+                            <X class="h-3.5 w-3.5" />
+                            {{ t("structureEditor.remove") }}
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   </tbody>

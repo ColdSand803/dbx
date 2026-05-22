@@ -743,6 +743,8 @@ export default {
     drop: "Eliminar",
     restore: "Restaurar",
     remove: "Quitar",
+    moveColumnUp: "Mover columna arriba",
+    moveColumnDown: "Mover columna abajo",
     yes: "Sí",
     no: "No",
     emptyReadonly: "Sin registros",
