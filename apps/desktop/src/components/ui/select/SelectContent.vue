@@ -21,7 +21,7 @@ const props = withDefaults(
   {
     position: "popper",
     disablePortal: false,
-    disableOutsidePointerEvents: false,
+    disableOutsidePointerEvents: true,
   },
 );
 const emits = defineEmits<SelectContentEmits>();
