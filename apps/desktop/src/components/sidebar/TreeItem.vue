@@ -1655,9 +1655,10 @@ const rowStyle = computed(() => {
   const backgroundColor = hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08);
   return {
     paddingLeft: paddingLeft.value,
+    "--tree-connection-row-bg": backgroundColor,
+    "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.18 : 0.12),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),
     "--tree-connection-active-focus-bg": hexToRgba(color, 0.22),
-    backgroundColor,
   };
 });
 
@@ -2257,15 +2258,17 @@ function treeItemMenuItems(): ContextMenuItem[] {
       <div
         ref="rowRef"
         class="group flex items-center gap-1.5 py-1 px-2 cursor-pointer hover:bg-accent transition-colors relative outline-none"
-        style="contain: layout style paint"
+        style="contain: layout style"
         :class="[
           rowWidthClass,
           {
             'ring-1 ring-primary/50 bg-primary/5': showDropInside,
             'opacity-50': isDragging,
+            'tree-item-connection-tint': connectionColor,
             'rounded-none': connectionColor && !isSelected,
             'rounded-sm': !connectionColor && !isSelected,
-            'tree-item-active rounded-md': isSelected,
+            'tree-item-active rounded-none': connectionColor && isSelected,
+            'tree-item-active rounded-md': !connectionColor && isSelected,
             'tree-item-highlight': highlighted,
           },
         ]"
@@ -2665,6 +2668,44 @@ function treeItemMenuItems(): ContextMenuItem[] {
 </template>
 
 <style>
+.tree-item-connection-tint {
+  isolation: isolate;
+  background-color: transparent !important;
+}
+
+.tree-item-connection-tint::before {
+  content: "";
+  position: absolute;
+  inset: 0 -9999px;
+  z-index: 0;
+  background-color: var(--tree-connection-row-bg);
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.tree-item-connection-tint > * {
+  position: relative;
+  z-index: 1;
+}
+
+.tree-item-connection-tint:hover,
+.tree-item-connection-tint.tree-item-active,
+.tree-item-connection-tint.tree-item-active:focus {
+  background-color: transparent !important;
+}
+
+.tree-item-connection-tint:hover::before {
+  background-color: var(--tree-connection-row-hover-bg, var(--tree-connection-row-bg));
+}
+
+.tree-item-connection-tint.tree-item-active::before {
+  background-color: var(--tree-connection-active-bg, var(--tree-connection-row-bg));
+}
+
+.tree-item-connection-tint.tree-item-active:focus::before {
+  background-color: var(--tree-connection-active-focus-bg, var(--tree-connection-active-bg));
+}
+
 /* Unfocused: subtle gray */
 .tree-item-active {
   background-color: var(--tree-connection-active-bg, oklch(0.94 0 0)) !important;
