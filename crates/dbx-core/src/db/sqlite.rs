@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(result.rows[0][2].as_f64(), Some(0.0));
         assert_eq!(result.rows[0][3].as_f64(), Some(2.0));
         let pi = result.rows[0][4].as_f64().expect("PI() returns a real value");
-        assert!((3.14..3.15).contains(&pi));
+        assert!((std::f64::consts::PI - pi).abs() < 0.00001);
     }
 
     #[tokio::test]

@@ -1439,13 +1439,13 @@ mod tests {
         let con = duckdb::Connection::open_in_memory().expect("connect in-memory DuckDB");
         let result = duckdb_execute(
             &con,
-            "SELECT 3.14159::DOUBLE AS pi, 0.5::DOUBLE AS half, 99.99::DOUBLE AS price, 1.0::DOUBLE AS one",
+            "SELECT 12.34567::DOUBLE AS sample, 0.5::DOUBLE AS half, 99.99::DOUBLE AS price, 1.0::DOUBLE AS one",
         )
         .expect("execute double query");
 
-        assert_eq!(result.columns, vec!["pi", "half", "price", "one"]);
+        assert_eq!(result.columns, vec!["sample", "half", "price", "one"]);
         let row = &result.rows[0];
-        assert_eq!(row[0], serde_json::json!(3.14159));
+        assert_eq!(row[0], serde_json::json!(12.34567));
         assert_eq!(row[1], serde_json::json!(0.5));
         assert_eq!(row[2], serde_json::json!(99.99));
         assert_eq!(row[3], serde_json::json!(1.0));

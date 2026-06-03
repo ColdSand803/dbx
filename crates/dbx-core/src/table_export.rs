@@ -308,9 +308,9 @@ mod tests {
 
     #[test]
     fn formats_csv_rows_with_boolean_and_number_values() {
-        let rows = vec![vec![json!(true), json!(3.14)], vec![json!(false), json!(-42)]];
+        let rows = vec![vec![json!(true), json!(2.75)], vec![json!(false), json!(-42)]];
         let out = format_csv_rows(&rows);
-        assert!(csv_lines_equal(&out, "\"true\",\"3.14\"\n\"false\",\"-42\""));
+        assert!(csv_lines_equal(&out, "\"true\",\"2.75\"\n\"false\",\"-42\""));
     }
 
     #[test]

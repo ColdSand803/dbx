@@ -73,10 +73,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Cargo clippy
-        run: cargo clippy --workspace --locked
-
-      - name: Cargo check
-        run: cargo check --workspace --locked
+        run: cargo clippy --workspace --locked --all-targets
 
       - name: Cargo test
         run: cargo test --workspace --locked
