@@ -686,6 +686,7 @@ async function openData() {
   queryStore.setTableMeta(tabId, {
     schema: tableSchema,
     tableName: node.label,
+    tableType: node.type === "view" ? "VIEW" : "TABLE",
     columns: [],
     primaryKeys: [],
   });
@@ -711,7 +712,7 @@ async function openData() {
         elapsed: elapsed(),
       });
       columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
-      primaryKeys = editablePrimaryKeys(effectiveDbType, columns);
+      primaryKeys = editablePrimaryKeys(effectiveDbType, columns, node.type === "view" ? "VIEW" : "TABLE");
       console.info("[DBX][openData:get-columns:done]", {
         traceId,
         columnCount: columns.length,
@@ -721,6 +722,7 @@ async function openData() {
       queryStore.setTableMeta(tabId, {
         schema: tableSchema,
         tableName: node.label,
+        tableType: node.type === "view" ? "VIEW" : "TABLE",
         columns,
         primaryKeys,
       });

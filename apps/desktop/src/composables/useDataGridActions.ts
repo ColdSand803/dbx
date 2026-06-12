@@ -27,7 +27,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const config = connectionStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
-    const primaryKeys = tab.tableMeta ? editablePrimaryKeys(effectiveDbType, tab.tableMeta.columns) : (tableMeta?.primaryKeys ?? []);
+    const primaryKeys = tab.tableMeta ? editablePrimaryKeys(effectiveDbType, tab.tableMeta.columns, tab.tableMeta.tableType) : (tableMeta?.primaryKeys ?? []);
     if (tab.tableMeta && primaryKeys.join("\0") !== tab.tableMeta.primaryKeys.join("\0")) {
       tab.tableMeta.primaryKeys = primaryKeys;
     }
@@ -55,10 +55,11 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const config = connectionStore.getConfig(tab.connectionId);
     const querySchema = connectionObjectTreeQuerySchema(config, tab.database, tableMeta.schema);
     const columns = await api.getColumns(tab.connectionId, tab.database, querySchema, tableMeta.tableName);
-    const primaryKeys = editablePrimaryKeys(effectiveDatabaseTypeForConnection(config), columns);
+    const primaryKeys = editablePrimaryKeys(effectiveDatabaseTypeForConnection(config), columns, tableMeta.tableType);
     queryStore.setTableMeta(tab.id, {
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
+      tableType: tableMeta.tableType,
       columns,
       primaryKeys,
     });
