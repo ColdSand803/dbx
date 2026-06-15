@@ -32,6 +32,10 @@ fn qualifies_schema_only_for_schema_aware_databases() {
     assert_eq!(qualified_table_name(Some(DatabaseType::Mysql), Some("public"), "users"), "`users`");
     assert_eq!(qualified_table_name(Some(DatabaseType::Goldendb), Some("public"), "users"), "`users`");
     assert_eq!(qualified_table_name(Some(DatabaseType::Databend), Some("dbx_test"), "users"), "`dbx_test`.`users`");
+    assert_eq!(
+        qualified_table_name(Some(DatabaseType::Xugu), Some("DBX_TEST"), "PRODUCTS"),
+        "\"DBX_TEST\".\"PRODUCTS\""
+    );
     assert_eq!(qualified_table_name(Some(DatabaseType::Jdbc), Some("cbsdw_dwd"), "dwd_test_df"), "dwd_test_df");
     assert_eq!(qualified_table_name(Some(DatabaseType::Iotdb), Some("root.test"), "device2"), "root.test.device2");
     assert_eq!(
@@ -99,6 +103,17 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
             limit: 500,
         }),
         "SELECT * FROM `dbx_test`.`jdbc_probe` LIMIT 500;"
+    );
+    assert_eq!(
+        build_table_select_sql(TableSelectSqlOptions {
+            database_type: Some(DatabaseType::Xugu),
+            schema: Some("DBX_TEST"),
+            table_name: "PRODUCTS",
+            columns: &[],
+            order_columns: &[],
+            limit: 100,
+        }),
+        "SELECT * FROM \"DBX_TEST\".\"PRODUCTS\" LIMIT 100;"
     );
     assert_eq!(
         build_table_select_sql(TableSelectSqlOptions {
@@ -195,6 +210,22 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
         }),
         "SELECT * FROM \"public\".\"orders\" WHERE (amount > 10) LIMIT 50 OFFSET 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Xugu),
+            schema: Some("DBX_TEST".to_string()),
+            table_name: "PRODUCTS".to_string(),
+            primary_keys: Vec::new(),
+            columns: Vec::new(),
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(100),
+            offset: None,
+            where_input: None,
+            include_row_id: false,
+        }),
+        "SELECT * FROM \"DBX_TEST\".\"PRODUCTS\" LIMIT 100;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
