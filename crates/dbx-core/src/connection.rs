@@ -875,6 +875,17 @@ impl AppState {
         }
     }
 
+    pub async fn remove_pool_by_key(&self, pool_key: &str) -> bool {
+        self.stop_keepalive_task(pool_key).await;
+        let removed = self.connections.write().await.remove(pool_key);
+        if let Some(pool) = removed {
+            close_pool_kind(pool).await;
+            true
+        } else {
+            false
+        }
+    }
+
     pub async fn close_database_pool(&self, connection_id: &str, database: Option<&str>) -> Result<bool, String> {
         let db_type = {
             let configs = self.configs.read().await;
