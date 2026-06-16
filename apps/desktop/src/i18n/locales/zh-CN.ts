@@ -1219,6 +1219,7 @@
     triggers: "触发器",
     tables: "表",
     views: "视图",
+    materializedViews: "物化视图",
     procedures: "存储过程",
     functions: "函数",
     sequences: "序列",

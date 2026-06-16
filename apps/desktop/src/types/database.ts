@@ -211,7 +211,7 @@ export interface TableInfo {
   parent_name?: string | null;
 }
 
-export type DatabaseObjectType = "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+export type DatabaseObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
 
 export interface ObjectInfo {
   name: string;
@@ -224,7 +224,7 @@ export interface ObjectInfo {
   parent_name?: string | null;
 }
 
-export type ObjectSourceKind = "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
+export type ObjectSourceKind = "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY";
 
 export interface ObjectSource {
   name: string;
@@ -390,6 +390,7 @@ export type TreeNodeType =
   | "schema"
   | "table"
   | "view"
+  | "materialized_view"
   | "procedure"
   | "function"
   | "sequence"
@@ -401,6 +402,7 @@ export type TreeNodeType =
   | "group-triggers"
   | "group-tables"
   | "group-views"
+  | "group-materialized-views"
   | "group-procedures"
   | "group-functions"
   | "group-sequences"

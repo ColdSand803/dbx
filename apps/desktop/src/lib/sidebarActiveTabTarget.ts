@@ -105,7 +105,7 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
     return node.type === "saved-sql-file" && node.savedSqlId === target.savedSqlId;
   }
 
-  return (node.type === "table" || node.type === "view") && node.connectionId === target.connectionId && node.database === target.database && schemaMatches(node, target.schema) && node.label === target.tableName;
+  return (node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId === target.connectionId && node.database === target.database && schemaMatches(node, target.schema) && node.label === target.tableName;
 }
 
 export function findSidebarNodeForActiveTab(tab: QueryTab | undefined | null, flatNodes: readonly FlatTreeNode[]): FlatTreeNode | null {

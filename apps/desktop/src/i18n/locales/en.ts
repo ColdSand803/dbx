@@ -1220,6 +1220,7 @@
     triggers: "Triggers",
     tables: "Tables",
     views: "Views",
+    materializedViews: "Materialized Views",
     procedures: "Procedures",
     functions: "Functions",
     sequences: "Sequences",

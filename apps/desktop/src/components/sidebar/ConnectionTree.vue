@@ -394,7 +394,7 @@ async function ensureTableObjectGroupsLoaded(target: Extract<ActiveTabSidebarTar
 function findTableObjectGroupNodes(nodes: TreeNode[], target: Extract<ActiveTabSidebarTarget, { type: "table" }>): TreeNode[] {
   const matches: TreeNode[] = [];
   for (const node of nodes) {
-    if ((node.type === "group-tables" || node.type === "group-views") && node.connectionId === target.connectionId && sameTreeName(node.database, target.database) && (!target.schema || sameTreeName(node.schema, target.schema))) {
+    if ((node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views") && node.connectionId === target.connectionId && sameTreeName(node.database, target.database) && (!target.schema || sameTreeName(node.schema, target.schema))) {
       matches.push(node);
     }
     if (node.children) {

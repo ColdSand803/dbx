@@ -201,6 +201,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Table, colorClass: "text-green-500" };
     case "view":
       return { icon: Eye, colorClass: "text-purple-500" };
+    case "materialized_view":
+      return { icon: Eye, colorClass: "text-indigo-500" };
     case "column":
       if ((node.meta as ColumnInfo).is_primary_key) {
         return { icon: Columns3, colorClass: "text-orange-400" };
@@ -249,6 +251,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Table, colorClass: "text-green-500" };
     case "group-views":
       return { icon: Eye, colorClass: "text-purple-500" };
+    case "group-materialized-views":
+      return { icon: Eye, colorClass: "text-indigo-500" };
     case "group-procedures":
       return { icon: ScrollText, colorClass: "text-blue-500" };
     case "group-functions":
@@ -266,8 +270,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   }
 }
 
-const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions"]);
-const pinnableTypes: Set<TreeNodeType> = new Set(["connection-group", "database", "schema", "table", "view", "redis-db", "mongo-db", "mongo-collection", "elasticsearch-index"]);
+const groupTypes: Set<TreeNodeType> = new Set(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-sequences", "group-packages", "group-partitions"]);
+const pinnableTypes: Set<TreeNodeType> = new Set(["connection-group", "database", "schema", "table", "view", "materialized_view", "redis-db", "mongo-db", "mongo-collection", "elasticsearch-index"]);
 
 function isGroupLabel(node: TreeNode): boolean {
   return groupTypes.has(node.type);
@@ -282,7 +286,7 @@ function displayLabel(node: TreeNode): string {
 }
 
 function visibleLabel(node: TreeNode): string {
-  if (node.type === "table" || node.type === "view" || node.type === "mongo-collection" || node.type === "elasticsearch-index") {
+  if (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "elasticsearch-index") {
     return sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes);
   }
   return displayLabel(node);
@@ -326,7 +330,7 @@ async function toggle() {
     return;
   }
 
-  const databaseObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages";
+  const databaseObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages";
   if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
     node.isExpanded = !node.isExpanded;
     emit("node-toggled", node, wasExpanded);
@@ -382,7 +386,7 @@ async function toggle() {
       }
     } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema);
-    } else if ((node.type === "table" || node.type === "view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+    } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "group-columns" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id);
@@ -685,7 +689,7 @@ async function openUserAdmin() {
 
 async function openData() {
   const node = props.node;
-  if (!(node.type === "table" || node.type === "view") || !hasNodeDatabaseContext(node)) return;
+  if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !hasNodeDatabaseContext(node)) return;
   const config = connectionStore.getConfig(node.connectionId);
   const traceId = uuid().slice(0, 8);
   const startedAt = performance.now();
@@ -730,7 +734,7 @@ async function openData() {
   queryStore.setTableMeta(tabId, {
     schema: tableSchema,
     tableName: node.label,
-    tableType: node.type === "view" ? "VIEW" : "TABLE",
+    tableType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE",
     columns: [],
     primaryKeys: [],
   });
@@ -761,7 +765,7 @@ async function openData() {
       });
       columns = await api.getColumns(node.connectionId, node.database, querySchema, node.label);
       if (!isActive()) return;
-      primaryKeys = editablePrimaryKeys(effectiveDbType, columns, node.type === "view" ? "VIEW" : "TABLE");
+      primaryKeys = editablePrimaryKeys(effectiveDbType, columns, node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE");
       console.info("[DBX][openData:get-columns:done]", {
         traceId,
         columnCount: columns.length,
@@ -771,7 +775,7 @@ async function openData() {
       queryStore.setTableMeta(tabId, {
         schema: tableSchema,
         tableName: node.label,
-        tableType: node.type === "view" ? "VIEW" : "TABLE",
+        tableType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE",
         columns,
         primaryKeys,
       });
@@ -822,7 +826,7 @@ async function newQuery() {
     if (hasTreeNodeDatabaseContext(node)) {
       const tabId = queryStore.createTab(node.connectionId, node.database, undefined, "query", node.schema);
       // For table/view nodes, generate SELECT * FROM table_name SQL
-      if (node.type === "table" || node.type === "view") {
+      if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
         const config = connectionStore.getConfig(node.connectionId);
         const dbType = config ? effectiveDatabaseTypeForConnection(config) : undefined;
         const tableSchema = node.schema || node.database;
@@ -1234,10 +1238,10 @@ function dropObjectSqlOptions(): DropObjectSqlOptions | null {
 }
 
 function dropObjectSqlOptionsForNode(node: TreeNode): DropObjectSqlOptions | null {
-  if (node.type !== "view" && node.type !== "procedure" && node.type !== "function") return null;
+  if (node.type !== "view" && node.type !== "materialized_view" && node.type !== "procedure" && node.type !== "function") return null;
   return {
     databaseType: tableStructureDatabaseTypeForNode(node),
-    objectType: node.type === "view" ? "VIEW" : node.type === "procedure" ? "PROCEDURE" : "FUNCTION",
+    objectType: node.type === "view" ? "VIEW" : node.type === "materialized_view" ? "MATERIALIZED_VIEW" : node.type === "procedure" ? "PROCEDURE" : "FUNCTION",
     schema: node.schema,
     name: node.label,
   };
@@ -1292,6 +1296,7 @@ function canDropTableChildObjectNode(node: TreeNode): boolean {
 
 function dropObjectMenuLabel(): string {
   if (props.node.type === "view") return t("contextMenu.dropView");
+  if (props.node.type === "materialized_view") return t("contextMenu.dropView");
   if (props.node.type === "procedure") return t("contextMenu.dropProcedure");
   if (props.node.type === "function") return t("contextMenu.dropFunction");
   return t("contextMenu.dropObject");
@@ -1299,6 +1304,7 @@ function dropObjectMenuLabel(): string {
 
 function dropObjectConfirmTitle(): string {
   if (props.node.type === "view") return t("contextMenu.confirmDropViewTitle");
+  if (props.node.type === "materialized_view") return t("contextMenu.confirmDropViewTitle");
   if (props.node.type === "procedure") return t("contextMenu.confirmDropProcedureTitle");
   if (props.node.type === "function") return t("contextMenu.confirmDropFunctionTitle");
   return t("contextMenu.confirmDropObjectTitle");
@@ -1306,6 +1312,7 @@ function dropObjectConfirmTitle(): string {
 
 function dropObjectConfirmMessage(): string {
   if (props.node.type === "view") return t("contextMenu.confirmDropViewMessage", { name: props.node.label });
+  if (props.node.type === "materialized_view") return t("contextMenu.confirmDropViewMessage", { name: props.node.label });
   if (props.node.type === "procedure") return t("contextMenu.confirmDropProcedureMessage", { name: props.node.label });
   if (props.node.type === "function") return t("contextMenu.confirmDropFunctionMessage", { name: props.node.label });
   return t("contextMenu.confirmDropObjectMessage", { name: props.node.label });
@@ -1376,13 +1383,14 @@ function viewObjectSource() {
 
 function viewObjectDdl() {
   const node = props.node;
-  if (node.type !== "view" || !node.connectionId || !node.database) return;
+  if ((node.type !== "view" && node.type !== "materialized_view") || !node.connectionId || !node.database) return;
   const schema = node.schema || node.database;
+  const objectType = node.type === "materialized_view" ? "MATERIALIZED_VIEW" : "VIEW";
   connectionStore
     .ensureConnected(node.connectionId)
     .then(() => {
       connectionStore.activeConnectionId = node.connectionId!;
-      return api.getObjectSource(node.connectionId!, node.database!, schema, node.label, "VIEW");
+      return api.getObjectSource(node.connectionId!, node.database!, schema, node.label, objectType);
     })
     .then(async (result) => {
       const connection = connectionStore.getConfig(node.connectionId!);
@@ -1434,7 +1442,7 @@ function requestDropTableChildObject() {
 
 function canDropTreeNode(node: TreeNode): boolean {
   if (node.type === "table") return !!node.connectionId && !!node.database;
-  if (node.type === "view" || node.type === "procedure" || node.type === "function") {
+  if (node.type === "view" || node.type === "materialized_view" || node.type === "procedure" || node.type === "function") {
     return !!node.connectionId && !!node.database && !!dropObjectSqlOptionsForNode(node);
   }
   return canDropTableChildObjectNode(node);
@@ -1523,6 +1531,7 @@ function requestDropSelectedNode(): boolean {
 function nodeRenameObjectType(): RenameableObjectType | null {
   if (props.node.type === "table") return "TABLE";
   if (props.node.type === "view") return "VIEW";
+  if (props.node.type === "materialized_view") return "MATERIALIZED_VIEW";
   if (props.node.type === "procedure") return "PROCEDURE";
   if (props.node.type === "function") return "FUNCTION";
   return null;
@@ -1622,9 +1631,9 @@ async function confirmDropObject() {
     await connectionStore.ensureConnected(node.connectionId);
     const sql = dropObjectPreviewSql.value || (await buildDropObjectSql(options));
     await api.executeQuery(node.connectionId, node.database, sql, node.schema);
-    const msgKey = node.type === "view" ? "contextMenu.dropViewSuccess" : node.type === "procedure" ? "contextMenu.dropProcedureSuccess" : "contextMenu.dropFunctionSuccess";
+    const msgKey = node.type === "view" ? "contextMenu.dropViewSuccess" : node.type === "materialized_view" ? "contextMenu.dropViewSuccess" : node.type === "procedure" ? "contextMenu.dropProcedureSuccess" : "contextMenu.dropFunctionSuccess";
     toast(t(msgKey, { name: node.label }), 3000);
-    if (node.type === "view") {
+    if (node.type === "view" || node.type === "materialized_view") {
       connectionStore.removeTreeNode(node.id);
     } else {
       await refreshTableList(node);
@@ -2528,8 +2537,8 @@ function openDatabaseExport() {
   connectionStore.databaseExportSource = {
     connectionId: node.connectionId,
     database: node.database,
-    schema: node.type === "schema" || node.type === "table" || node.type === "view" ? node.schema : undefined,
-    tableName: node.type === "table" || node.type === "view" ? node.label : undefined,
+    schema: node.type === "schema" || node.type === "table" || node.type === "view" || node.type === "materialized_view" ? node.schema : undefined,
+    tableName: node.type === "table" || node.type === "view" || node.type === "materialized_view" ? node.label : undefined,
   };
 }
 
@@ -2782,7 +2791,7 @@ const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
 const TABLE_REFERENCE_DRAGGING_CLASS = "dbx-table-reference-dragging";
 const canDragTableReference = computed(() => {
   if (props.dragDisabled || !props.node.connectionId || props.node.database == null) return false;
-  if (props.node.type === "table" || props.node.type === "view") return true;
+  if (props.node.type === "table" || props.node.type === "view" || props.node.type === "materialized_view") return true;
   return props.node.type === "column" && !!props.node.tableName;
 });
 
@@ -3209,8 +3218,8 @@ function treeItemMenuItems(): ContextMenuItem[] {
     return items;
   }
 
-  // 6. Table / View
-  if (node.type === "table" || node.type === "view") {
+  // 6. Table / View / Materialized View
+  if (node.type === "table" || node.type === "view" || node.type === "materialized_view") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: openData, icon: TableProperties });
@@ -3224,7 +3233,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
         icon: FileCode,
       });
     }
-    if (node.type === "view") {
+    if (node.type === "view" || node.type === "materialized_view") {
       items.push({ label: t("contextMenu.editView"), action: viewObjectSource, icon: Pencil });
       items.push({ label: t("contextMenu.viewSource"), action: viewObjectSource, icon: Code2 });
       items.push({ label: t("contextMenu.viewDdl"), action: viewObjectDdl, icon: FileCode });
@@ -3240,7 +3249,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
         shortcut: shortcutRename,
       });
     }
-    if (node.type === "view") {
+    if (node.type === "view" || node.type === "materialized_view") {
       items.push({
         label: deleteMenuLabel(t("contextMenu.dropView")),
         action: deleteMenuAction(requestDropObject),
@@ -3475,7 +3484,10 @@ function treeItemMenuItems(): ContextMenuItem[] {
           />
           <span v-else ref="labelRef" :class="labelWidthClass">{{ visibleLabel(node) }}</span>
           <span
-            v-if="(node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') && node.objectCount != null"
+            v-if="
+              (node.type === 'group-tables' || node.type === 'group-views' || node.type === 'group-materialized-views' || node.type === 'group-procedures' || node.type === 'group-functions' || node.type === 'group-sequences' || node.type === 'group-packages' || node.type === 'group-partitions') &&
+              node.objectCount != null
+            "
             class="text-muted-foreground text-[10px] shrink-0"
             >{{ node.objectCount }}</span
           >

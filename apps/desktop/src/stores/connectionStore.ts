@@ -1275,7 +1275,7 @@ export const useConnectionStore = defineStore("connection", () => {
         }
       }
 
-      const wantsOnlyTablesOrViews = objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW");
+      const wantsOnlyTablesOrViews = objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW");
       let children: TreeNode[];
       if (wantsOnlyTablesOrViews) {
         const page = await loadPagedTableGroupChildren({
@@ -1323,7 +1323,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const objectTypes = objectTypesForGroupNode(parent.type);
       const parentNodeId = objectGroupRefreshParentId(parent);
       if (!objectTypes || !parentNodeId) return;
-      if (!objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW")) return;
+      if (!objectTypes.every((objectType) => objectType === "TABLE" || objectType === "VIEW" || objectType === "MATERIALIZED_VIEW")) return;
 
       const config = getConfig(parent.connectionId);
       const querySchema = connectionObjectTreeQuerySchema(config, parent.database, parent.schema);
@@ -1605,7 +1605,7 @@ export const useConnectionStore = defineStore("connection", () => {
       }
     } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await loadTables(node.connectionId, node.database, node.schema, options);
-    } else if ((node.type === "table" || node.type === "view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+    } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "group-columns" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id);
@@ -1615,7 +1615,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadForeignKeys(node.connectionId, node.database, node.tableName, node.schema, node.id);
     } else if (node.type === "group-triggers" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await loadTriggers(node.connectionId, node.database, node.tableName, node.schema, node.id);
-    } else if (node.type === "group-tables" || node.type === "group-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages") {
+    } else if (node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages") {
       await loadObjectGroupChildren(node, options);
     } else if (node.type === "group-partitions") {
       node.isExpanded = true;
@@ -1962,7 +1962,7 @@ export const useConnectionStore = defineStore("connection", () => {
                   return tables.map((table) => ({
                     name: table.name,
                     schema: s,
-                    type: table.table_type === "VIEW" ? ("view" as const) : ("table" as const),
+                    type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
                   })) as SqlCompletionTable[];
                 } catch {
                   return [] as SqlCompletionTable[];
@@ -1984,7 +1984,7 @@ export const useConnectionStore = defineStore("connection", () => {
                     return tables.map((table) => ({
                       name: table.name,
                       schema: s,
-                      type: table.table_type === "VIEW" ? ("view" as const) : ("table" as const),
+                      type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
                     })) as SqlCompletionTable[];
                   } catch {
                     return [] as SqlCompletionTable[];
@@ -2011,7 +2011,7 @@ export const useConnectionStore = defineStore("connection", () => {
               return tables.map((table) => ({
                 name: table.name,
                 schema,
-                type: table.table_type === "VIEW" ? ("view" as const) : ("table" as const),
+                type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
               }));
             } catch {
               return [];
@@ -2030,7 +2030,7 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       completionTablesCache.value[cacheKey] = tables.map((table) => ({
         name: table.name,
-        type: table.table_type === "VIEW" ? ("view" as const) : ("table" as const),
+        type: table.table_type === "VIEW" || table.table_type === "MATERIALIZED VIEW" ? ("view" as const) : ("table" as const),
       }));
       completionTablesCache.value[cacheKey] = limit ? completionTablesCache.value[cacheKey].slice(0, limit) : completionTablesCache.value[cacheKey];
       indexCompletionTables(connectionId, database, schema, completionTablesCache.value[cacheKey]);
