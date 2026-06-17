@@ -19,6 +19,9 @@ export interface ColumnInfo {
   column_default: string | null;
   is_primary_key: boolean;
   comment: string | null;
+  numeric_precision?: number | null;
+  numeric_scale?: number | null;
+  character_maximum_length?: number | null;
 }
 
 export interface QueryResult {
@@ -312,6 +315,9 @@ interface BridgeColumnInfo {
   column_default: string | null;
   is_primary_key: boolean;
   comment: string | null;
+  numeric_precision?: number | null;
+  numeric_scale?: number | null;
+  character_maximum_length?: number | null;
 }
 
 interface MongoDocumentResult {
@@ -623,6 +629,9 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
       column_default: c.column_default,
       is_primary_key: c.is_primary_key,
       comment: c.comment,
+      numeric_precision: c.numeric_precision,
+      numeric_scale: c.numeric_scale,
+      character_maximum_length: c.character_maximum_length,
     }));
   }
   let result: QueryResult;
