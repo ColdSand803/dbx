@@ -802,9 +802,114 @@ fn builds_mysql_column_reorder_statements() {
         result.statements,
         vec![
             "ALTER TABLE `users` MODIFY COLUMN `email` varchar(255) AFTER `id`;",
-            "ALTER TABLE `users` CHANGE COLUMN `name` `display_name` varchar(120) AFTER `email`;",
+            "ALTER TABLE `users` CHANGE COLUMN `name` `display_name` varchar(120);",
         ]
     );
+}
+
+#[test]
+fn mysql_add_column_before_existing_column_does_not_reorder_shifted_column() {
+    let mut deleted = column("deleted");
+    deleted.original_position = Some(0);
+    deleted.original = Some(ColumnInfo {
+        name: "deleted".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let new_column = column("sss");
+
+    let mut tenant_id = column("tenant_id");
+    tenant_id.data_type = "bigint".to_string();
+    tenant_id.is_nullable = false;
+    tenant_id.default_value = "0".to_string();
+    tenant_id.comment = "tenant id".to_string();
+    tenant_id.original_position = Some(1);
+    tenant_id.original = Some(ColumnInfo {
+        name: "tenant_id".to_string(),
+        data_type: "bigint".to_string(),
+        is_nullable: false,
+        column_default: Some("0".to_string()),
+        is_primary_key: false,
+        extra: None,
+        comment: Some("tenant id".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "infra_api_error_log".to_string(),
+        columns: vec![deleted, new_column, tenant_id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `infra_api_error_log` ADD COLUMN `sss` varchar(255) AFTER `deleted`;"]
+    );
+}
+
+#[test]
+fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move() {
+    let mut id = column("id");
+    id.original_position = Some(0);
+    id.original = Some(ColumnInfo {
+        name: "id".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let mut name = column("name");
+    name.original_position = Some(1);
+    name.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let mut email = column("email");
+    email.original_position = Some(2);
+    email.original = Some(ColumnInfo {
+        name: "email".to_string(),
+        data_type: "varchar(255)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![id, email, name],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `users` MODIFY COLUMN `email` varchar(255) AFTER `id`;"]);
 }
 
 #[test]
