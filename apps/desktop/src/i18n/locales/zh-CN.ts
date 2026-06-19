@@ -461,7 +461,7 @@ export default {
     autoKeepResultsEnabled: "已开启自动保留结果",
     autoKeepResultsDisabled: "已关闭自动保留结果",
     missingResultRun: "此结果已不可用",
-    exportResultArchive: "导出结果",
+    exportResultArchive: "保存结果归档",
     importResultArchive: "导入结果",
     importedResultArchive: "导入的结果",
     resultArchiveExported: "结果已导出",

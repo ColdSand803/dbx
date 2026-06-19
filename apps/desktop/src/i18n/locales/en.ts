@@ -460,7 +460,7 @@ export default {
     autoKeepResultsEnabled: "Auto-keep results enabled",
     autoKeepResultsDisabled: "Auto-keep results disabled",
     missingResultRun: "This result is no longer available",
-    exportResultArchive: "Export Results",
+    exportResultArchive: "Save Result Archive",
     importResultArchive: "Import Results",
     importedResultArchive: "Imported results",
     resultArchiveExported: "Results exported",
