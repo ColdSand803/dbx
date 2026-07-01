@@ -917,6 +917,8 @@ export default withEnglishFallback({
     remove: "移除",
     retry: "重試",
     more: "更多",
+    showPassword: "顯示密碼",
+    hidePassword: "隱藏密碼",
     done: "完成",
     connection: "連線",
     database: "資料庫",

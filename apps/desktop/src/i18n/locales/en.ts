@@ -931,6 +931,8 @@ export default {
     more: "More",
     decrease: "Decrease",
     increase: "Increase",
+    showPassword: "Show password",
+    hidePassword: "Hide password",
     done: "Done",
     connection: "Connection",
     database: "Database",

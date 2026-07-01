@@ -916,6 +916,8 @@ export default withEnglishFallback({
     remove: "Eliminar",
     retry: "Reintentar",
     more: "Más",
+    showPassword: "Mostrar contraseña",
+    hidePassword: "Ocultar contraseña",
     done: "Listo",
     connection: "Conexión",
     database: "Base de datos",

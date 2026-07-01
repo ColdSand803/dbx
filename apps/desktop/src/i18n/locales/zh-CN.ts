@@ -934,6 +934,8 @@ export default withEnglishFallback({
     more: "更多",
     decrease: "减小",
     increase: "增大",
+    showPassword: "显示密码",
+    hidePassword: "隐藏密码",
     done: "完成",
     connection: "连接",
     database: "数据库",

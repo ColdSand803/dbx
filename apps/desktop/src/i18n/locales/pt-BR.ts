@@ -925,6 +925,8 @@ export default withEnglishFallback({
     save: "Salvar",
     retry: "Tentar novamente",
     more: "Mais",
+    showPassword: "Mostrar senha",
+    hidePassword: "Ocultar senha",
     done: "Concluído",
     copy: "Copiar",
     import: "Importar",

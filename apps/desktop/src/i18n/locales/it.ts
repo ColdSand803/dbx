@@ -932,6 +932,8 @@ export default withEnglishFallback({
     more: "Altro",
     decrease: "Riduci",
     increase: "Aumenta",
+    showPassword: "Mostra password",
+    hidePassword: "Nascondi password",
     done: "Fatto",
     connection: "Connessione",
     database: "Database",

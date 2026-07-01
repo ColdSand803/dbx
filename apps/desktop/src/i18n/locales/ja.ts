@@ -914,6 +914,8 @@ export default withEnglishFallback({
     save: "保存",
     retry: "再試行",
     more: "もっと見る",
+    showPassword: "パスワードを表示",
+    hidePassword: "パスワードを隠す",
     done: "完了",
     connection: "接続",
     database: "データベース",
