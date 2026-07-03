@@ -1218,6 +1218,9 @@ export default {
       convert: "e.g. convert to PostgreSQL / MySQL / SQL Server",
       sampleData: "Describe the sample data or test statements to generate",
     },
+    editMessage: "Edit message",
+    editResend: "Resend",
+    editCancel: "Cancel",
   },
   contextMenu: {
     openConnection: "Open Connection",
