@@ -276,6 +276,14 @@ function statementIndexAt(sql: string, offset: number): number {
 }
 
 function columnsForTable(table: SqlTableReference, columnsByTable: Map<string, SqlCompletionColumn[]>, loadedColumnTables?: Set<string>): SqlCompletionColumn[] | null {
+  const inlineColumns = (table as SqlTableReference & { columns?: string[] }).columns;
+  if (inlineColumns && inlineColumns.length > 0) {
+    return inlineColumns.map((name) => ({
+      name,
+      table: table.name,
+      schema: table.schema ?? undefined,
+    }));
+  }
   const keys = table.schema ? [`${table.schema}.${table.name}`, table.name] : [table.name, ...keysWithTableName(columnsByTable, table.name)];
   for (const key of keys) {
     const normalizedKey = normalizeName(key);

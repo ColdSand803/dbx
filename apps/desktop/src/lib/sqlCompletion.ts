@@ -1282,7 +1282,7 @@ class SqlCompletionProvider {
     }
 
     if (context.onStar) {
-      const starItem = buildStarExpansionItem(this.input.columnsByTable, this.t, this.dialect);
+      const starItem = buildStarExpansionItem(context, this.input.columnsByTable, this.t, this.dialect);
       if (starItem) this.items.push(starItem);
     }
 
@@ -2692,22 +2692,16 @@ function buildPreferredKeywordItems(prefix: string, keywords: string[], keywordC
     }));
 }
 
-function buildStarExpansionItem(columnsByTable: Map<string, SqlCompletionColumn[]>, t?: SqlCompletionTranslations, dialect?: "mysql" | "postgres" | "sqlserver"): SqlCompletionItem | null {
-  const allColumns: string[] = [];
-  const seen = new Set<string>();
-  for (const [, cols] of columnsByTable) {
-    for (const col of cols) {
-      if (seen.has(col.name)) continue;
-      seen.add(col.name);
-      allColumns.push(quoteSqlIdentifier(col.name, dialect));
-    }
-  }
-  if (allColumns.length === 0) return null;
-  const expansion = allColumns.join(", ");
+function buildStarExpansionItem(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, t?: SqlCompletionTranslations, dialect?: "mysql" | "postgres" | "sqlserver"): SqlCompletionItem | null {
+  const columns = context.qualifier ? referencedTablesForSelectAllColumns(context).flatMap((ref) => columnsForSelectAllReferencedTable(ref, columnsByTable)) : [...columnsByTable.values()].flat();
+  const uniqueColumns = uniqueColumnsByName(columns);
+  if (uniqueColumns.length === 0) return null;
+  // `alias.*` replaces only the `*`, so the first column must continue the already typed `alias.`.
+  const expansion = context.qualifier ? buildSelectAllColumnExpansion(uniqueColumns, context.qualifier, true, dialect) : uniqueColumns.map((column) => quoteSqlIdentifier(column.name, dialect)).join(", ");
   return {
     label: "* → columns",
     type: "snippet" as const,
-    detail: `${(t?.starExpansionColumns ?? "{count} columns").replace("{count}", String(allColumns.length))}: ${expansion.length > 60 ? expansion.slice(0, 57) + "..." : expansion}`,
+    detail: `${(t?.starExpansionColumns ?? "{count} columns").replace("{count}", String(uniqueColumns.length))}: ${expansion.length > 60 ? expansion.slice(0, 57) + "..." : expansion}`,
     apply: expansion,
     boost: 1900,
   };
