@@ -97,6 +97,37 @@ export function documentFilterModeNeedsValue(mode: DocumentFilterMode): boolean 
   return mode !== "is-null" && mode !== "is-not-null";
 }
 
+export function documentFieldPathOptionsFromDocuments(documents: readonly Record<string, unknown>[]): string[] {
+  if (documents.length === 0) return [];
+  const fields = new Set<string>();
+  fields.add("_id");
+  for (const doc of documents) {
+    for (const [key, value] of Object.entries(doc)) {
+      if (key === "_id") continue;
+      collectDocumentFieldPaths(fields, key, value);
+    }
+  }
+  return [...fields];
+}
+
+function collectDocumentFieldPaths(fields: Set<string>, path: string, value: unknown, depth = 0): void {
+  fields.add(path);
+  if (depth >= 6) return;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (isPlainRecord(item)) collectNestedDocumentFieldPaths(fields, path, item, depth + 1);
+    }
+    return;
+  }
+  if (isPlainRecord(value)) collectNestedDocumentFieldPaths(fields, path, value, depth + 1);
+}
+
+function collectNestedDocumentFieldPaths(fields: Set<string>, parentPath: string, value: Record<string, unknown>, depth: number): void {
+  for (const [key, nestedValue] of Object.entries(value)) {
+    collectDocumentFieldPaths(fields, `${parentPath}.${key}`, nestedValue, depth);
+  }
+}
+
 type DocumentFilterParseOptions = {
   kind?: DocumentStoreKind;
 };
@@ -247,6 +278,11 @@ export function currentDocumentFilterJson(input: string, structured: Record<stri
 export function currentDocumentSortJson(input: string): string | undefined {
   const sort = parseDocumentFilterInput(input);
   return Object.keys(sort).length ? JSON.stringify(sort) : undefined;
+}
+
+export function formatDocumentQueryInput(input: string, kind?: DocumentStoreKind): string {
+  const parsed = parseDocumentFilterInput(input, { kind });
+  return JSON.stringify(parsed, null, 2);
 }
 
 function parseDocumentFilterValue(raw: string, options: DocumentFilterParseOptions = {}): unknown {

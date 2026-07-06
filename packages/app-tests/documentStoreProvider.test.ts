@@ -1,6 +1,15 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildDocumentFilterCondition, combineDocumentFilterConditions, currentDocumentFilterJson, documentStoreProviderFor, elasticsearchSearchBodyFromDocumentQuery, type DocumentFilterRule } from "../../apps/desktop/src/lib/app/documentStoreProvider.ts";
+import {
+  buildDocumentFilterCondition,
+  combineDocumentFilterConditions,
+  currentDocumentFilterJson,
+  documentFieldPathOptionsFromDocuments,
+  documentStoreProviderFor,
+  elasticsearchSearchBodyFromDocumentQuery,
+  formatDocumentQueryInput,
+  type DocumentFilterRule,
+} from "../../apps/desktop/src/lib/app/documentStoreProvider.ts";
 
 function rule(patch: Partial<DocumentFilterRule>): DocumentFilterRule {
   return {
@@ -43,6 +52,19 @@ test("builds reusable document filter conditions", () => {
   assert.deepEqual(buildDocumentFilterCondition(rule({ mode: "is-not-null", rawValue: "" })), { city: { $ne: null } });
 });
 
+test("extracts nested document field paths for structured filters", () => {
+  assert.deepEqual(
+    documentFieldPathOptionsFromDocuments([
+      { _id: "1", profile: { city: "上海", address: { zip: 200000 } }, tags: ["a"] },
+      { _id: "2", status: "active", profile: { city: "北京" }, audit: [{ by: "ops" }] },
+    ]),
+    ["_id", "profile", "profile.city", "profile.address", "profile.address.zip", "tags", "status", "audit", "audit.by"],
+  );
+});
+
+test("formats document query object input", () => {
+  assert.equal(formatDocumentQueryInput('{profile:{city:"上海"},status:"active"}', "mongodb"), ['{', '  "profile": {', '    "city": "上海"', '  },', '  "status": "active"', '}'].join("\n"));
+});
 test("preserves MongoDB int64 document filter values", () => {
   const id = "2048938405781032962";
   const firstUnsafeInteger = "9007199254740993";

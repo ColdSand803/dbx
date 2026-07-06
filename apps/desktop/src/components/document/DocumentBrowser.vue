@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { RefreshCw, RefreshCcw, Loader2, Trash2, Plus, Save, ChevronLeft, ChevronRight, Table2, Braces, X, Columns3, Check, Search, Wrench, Filter } from "@lucide/vue";
@@ -22,9 +22,11 @@ import {
   currentDocumentFilterJson,
   currentDocumentSortJson,
   defaultDocumentFilterRule,
+  documentFieldPathOptionsFromDocuments,
   documentFilterModeNeedsValue,
   documentFilterModeOptions,
   documentStoreProviderFor,
+  formatDocumentQueryInput,
   type DocumentFilterMode,
   type DocumentFilterRule,
 } from "@/lib/app/documentStoreProvider";
@@ -74,6 +76,8 @@ const viewMode = computed<ViewMode>({
 });
 const filterInput = ref("");
 const sortInput = ref("");
+const filterInputRef = ref<HTMLTextAreaElement>();
+const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
 const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
@@ -170,7 +174,10 @@ const gridResult = computed<QueryResult>(() => {
 
   return { columns, rows, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
-const documentFilterFieldOptions = computed(() => gridResult.value.columns);
+const documentFilterFieldOptions = computed(() => {
+  const nestedFields = documentFieldPathOptionsFromDocuments(documents.value);
+  return nestedFields.length > 0 ? nestedFields : gridResult.value.columns;
+});
 const documentStructuredFilterCount = computed(() => (appliedDocumentFilter.value ? 1 : 0));
 const documentLoadingLabelKey = computed(() => (documentLoadCancelling.value ? "common.stopping" : "common.loading"));
 let documentLoadingTimer: ReturnType<typeof setInterval> | undefined;
@@ -212,6 +219,41 @@ function resetDocumentFilterBuilder() {
 function currentDocumentFilter(): string | undefined {
   return currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind);
 }
+
+function resizeDocumentQueryInput(el: HTMLTextAreaElement | undefined) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${Math.min(Math.max(el.scrollHeight, 20), 120)}px`;
+}
+
+function resizeDocumentQueryInputs() {
+  resizeDocumentQueryInput(filterInputRef.value);
+  resizeDocumentQueryInput(sortInputRef.value);
+}
+
+function formatFilterInput() {
+  try {
+    filterInput.value = formatDocumentQueryInput(filterInput.value, documentStoreProvider.value.kind);
+    error.value = "";
+    void nextTick(resizeDocumentQueryInputs);
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+function formatSortInput() {
+  try {
+    sortInput.value = formatDocumentQueryInput(sortInput.value);
+    error.value = "";
+    void nextTick(resizeDocumentQueryInputs);
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+watch([filterInput, sortInput], () => {
+  void nextTick(resizeDocumentQueryInputs);
+});
 
 const documentQueryPreview = computed(() => {
   let filter = "{}";
@@ -778,6 +820,7 @@ onMounted(async () => {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
   load();
+  void nextTick(resizeDocumentQueryInputs);
 });
 onBeforeUnmount(() => {
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
@@ -956,7 +999,7 @@ function resetTableSearchSplitWidth() {
     >
       <template #search-bar="{ localFilterCount, hasLocalColumnFilters, localFilterSummaries, clearLocalFilter }: { localFilterCount: number; hasLocalColumnFilters: boolean; localFilterSummaries: LocalFilterSummary[]; clearLocalFilter: (columnIndex?: number) => void }">
         <div ref="tableSearchSplitContainerRef" class="flex flex-1 min-w-0">
-          <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0" :style="tableFindPaneStyle">
+          <div class="flex flex-1 items-start gap-1 px-2 py-0.5 min-w-0" :style="tableFindPaneStyle">
             <Popover v-model:open="documentFilterBuilderOpen">
               <PopoverTrigger as-child>
                 <button
@@ -1087,11 +1130,26 @@ function resetTableSearchSplitWidth() {
                 </div>
               </PopoverContent>
             </Popover>
-            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.filterInputLabel }}</span>
-            <input v-model="filterInput" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono" placeholder="{}" @keydown.enter="applyFilter" />
+            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0 pt-0.5">{{ documentStoreProvider.filterInputLabel }}</span>
+            <textarea
+              ref="filterInputRef"
+              v-model="filterInput"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              rows="1"
+              class="document-query-input flex-1 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono"
+              placeholder="{}"
+              @keydown.ctrl.enter.prevent="applyFilter"
+              @keydown.meta.enter.prevent="applyFilter"
+            />
+            <button v-if="filterInput.trim()" type="button" class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
+              <Braces class="w-3 h-3" />
+            </button>
             <button
               v-if="filterInput.trim()"
-              class="text-muted-foreground hover:text-foreground shrink-0"
+              type="button"
+              class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5"
               @click="
                 filterInput = '';
                 applyFilter();
@@ -1109,12 +1167,27 @@ function resetTableSearchSplitWidth() {
           >
             <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
           </button>
-          <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0">
-            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.sortInputLabel }}</span>
-            <input v-model="sortInput" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono" placeholder="{}" @keydown.enter="applyFilter" />
+          <div class="flex flex-1 items-start gap-1 px-2 py-0.5 min-w-0">
+            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0 pt-0.5">{{ documentStoreProvider.sortInputLabel }}</span>
+            <textarea
+              ref="sortInputRef"
+              v-model="sortInput"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              rows="1"
+              class="document-query-input flex-1 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono"
+              placeholder="{}"
+              @keydown.ctrl.enter.prevent="applyFilter"
+              @keydown.meta.enter.prevent="applyFilter"
+            />
+            <button v-if="sortInput.trim()" type="button" class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5" title="Format JSON" aria-label="Format JSON" @click="formatSortInput">
+              <Braces class="w-3 h-3" />
+            </button>
             <button
               v-if="sortInput.trim()"
-              class="text-muted-foreground hover:text-foreground shrink-0"
+              type="button"
+              class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5"
               @click="
                 sortInput = '';
                 applyFilter();
@@ -1197,6 +1270,15 @@ function resetTableSearchSplitWidth() {
 </template>
 
 <style scoped>
+.document-query-input {
+  min-height: 20px;
+  max-height: 120px;
+  line-height: 1.25rem;
+  resize: none;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
 .json-viewer {
   font-family: var(--dbx-editor-font-family);
   font-size: var(--dbx-editor-font-size);
