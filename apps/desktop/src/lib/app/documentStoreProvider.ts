@@ -14,6 +14,18 @@ export type DocumentFilterRule = {
   conjunction: "AND" | "OR";
 };
 
+export type DocumentFieldPathKind = "scalar" | "object" | "array" | "array-object" | "mixed";
+
+export type DocumentFieldPathNode = {
+  key: string;
+  path: string;
+  label: string;
+  displayPath: string;
+  kind: DocumentFieldPathKind;
+  selectable: boolean;
+  children: DocumentFieldPathNode[];
+};
+
 export type DocumentStoreQueryPreviewOptions = {
   collection: string;
   filterJson?: string;
@@ -97,35 +109,106 @@ export function documentFilterModeNeedsValue(mode: DocumentFilterMode): boolean 
   return mode !== "is-null" && mode !== "is-not-null";
 }
 
+type DocumentFieldPathAccumulatorNode = {
+  key: string;
+  path: string;
+  kind: DocumentFieldPathKind;
+  children: DocumentFieldPathAccumulatorNode[];
+  childByKey: Map<string, DocumentFieldPathAccumulatorNode>;
+};
+
 export function documentFieldPathOptionsFromDocuments(documents: readonly Record<string, unknown>[]): string[] {
+  return flattenDocumentFieldPathTree(documentFieldPathTreeFromDocuments(documents)).map((node) => node.path);
+}
+
+export function documentFieldPathTreeFromDocuments(documents: readonly Record<string, unknown>[]): DocumentFieldPathNode[] {
   if (documents.length === 0) return [];
-  const fields = new Set<string>();
-  fields.add("_id");
+  const rootNodes: DocumentFieldPathAccumulatorNode[] = [];
+  const rootByKey = new Map<string, DocumentFieldPathAccumulatorNode>();
+  ensureDocumentFieldPathNode(rootNodes, rootByKey, "_id", "_id", "scalar");
+
   for (const doc of documents) {
     for (const [key, value] of Object.entries(doc)) {
       if (key === "_id") continue;
-      collectDocumentFieldPaths(fields, key, value);
+      collectDocumentFieldPathNode(rootNodes, rootByKey, key, value);
     }
   }
-  return [...fields];
+  return finalizeDocumentFieldPathNodes(rootNodes);
 }
 
-function collectDocumentFieldPaths(fields: Set<string>, path: string, value: unknown, depth = 0): void {
-  fields.add(path);
+export function flattenDocumentFieldPathTree(nodes: readonly DocumentFieldPathNode[]): DocumentFieldPathNode[] {
+  const flattened: DocumentFieldPathNode[] = [];
+  for (const node of nodes) {
+    flattened.push(node);
+    flattened.push(...flattenDocumentFieldPathTree(node.children));
+  }
+  return flattened;
+}
+
+function collectDocumentFieldPathNode(nodes: DocumentFieldPathAccumulatorNode[], byKey: Map<string, DocumentFieldPathAccumulatorNode>, path: string, value: unknown, depth = 0): void {
+  const key = path.split(".").pop() || path;
+  const node = ensureDocumentFieldPathNode(nodes, byKey, key, path, documentFieldPathKindFromValue(value));
   if (depth >= 6) return;
   if (Array.isArray(value)) {
     for (const item of value) {
-      if (isPlainRecord(item)) collectNestedDocumentFieldPaths(fields, path, item, depth + 1);
+      if (isPlainRecord(item)) collectNestedDocumentFieldPathNodes(node, item, depth + 1);
     }
     return;
   }
-  if (isPlainRecord(value)) collectNestedDocumentFieldPaths(fields, path, value, depth + 1);
+  if (isPlainRecord(value)) collectNestedDocumentFieldPathNodes(node, value, depth + 1);
 }
 
-function collectNestedDocumentFieldPaths(fields: Set<string>, parentPath: string, value: Record<string, unknown>, depth: number): void {
+function collectNestedDocumentFieldPathNodes(parent: DocumentFieldPathAccumulatorNode, value: Record<string, unknown>, depth: number): void {
   for (const [key, nestedValue] of Object.entries(value)) {
-    collectDocumentFieldPaths(fields, `${parentPath}.${key}`, nestedValue, depth);
+    collectDocumentFieldPathNode(parent.children, parent.childByKey, `${parent.path}.${key}`, nestedValue, depth);
   }
+}
+
+function ensureDocumentFieldPathNode(nodes: DocumentFieldPathAccumulatorNode[], byKey: Map<string, DocumentFieldPathAccumulatorNode>, key: string, path: string, kind: DocumentFieldPathKind): DocumentFieldPathAccumulatorNode {
+  const existing = byKey.get(key);
+  if (existing) {
+    existing.kind = mergeDocumentFieldPathKind(existing.kind, kind);
+    return existing;
+  }
+  const node: DocumentFieldPathAccumulatorNode = {
+    key,
+    path,
+    kind,
+    children: [],
+    childByKey: new Map(),
+  };
+  byKey.set(key, node);
+  nodes.push(node);
+  return node;
+}
+
+function documentFieldPathKindFromValue(value: unknown): DocumentFieldPathKind {
+  if (Array.isArray(value)) return value.some(isPlainRecord) ? "array-object" : "array";
+  if (isPlainRecord(value)) return "object";
+  return "scalar";
+}
+
+function mergeDocumentFieldPathKind(current: DocumentFieldPathKind, next: DocumentFieldPathKind): DocumentFieldPathKind {
+  if (current === next) return current;
+  if (current === "mixed" || next === "mixed") return "mixed";
+  if ((current === "array-object" && next === "array") || (current === "array" && next === "array-object")) return "array-object";
+  return "mixed";
+}
+
+function finalizeDocumentFieldPathNodes(nodes: readonly DocumentFieldPathAccumulatorNode[], parentDisplaySegments: readonly string[] = []): DocumentFieldPathNode[] {
+  return nodes.map((node) => {
+    const label = node.kind === "array" || node.kind === "array-object" ? `${node.key}[]` : node.key;
+    const displaySegments = [...parentDisplaySegments, label];
+    return {
+      key: node.key,
+      path: node.path,
+      label,
+      displayPath: displaySegments.join(" > "),
+      kind: node.kind,
+      selectable: true,
+      children: finalizeDocumentFieldPathNodes(node.children, displaySegments),
+    };
+  });
 }
 
 type DocumentFilterParseOptions = {

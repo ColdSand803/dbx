@@ -5,8 +5,10 @@ import {
   combineDocumentFilterConditions,
   currentDocumentFilterJson,
   documentFieldPathOptionsFromDocuments,
+  documentFieldPathTreeFromDocuments,
   documentStoreProviderFor,
   elasticsearchSearchBodyFromDocumentQuery,
+  flattenDocumentFieldPathTree,
   formatDocumentQueryInput,
   type DocumentFilterRule,
 } from "../../apps/desktop/src/lib/app/documentStoreProvider.ts";
@@ -59,6 +61,22 @@ test("extracts nested document field paths for structured filters", () => {
       { _id: "2", status: "active", profile: { city: "北京" }, audit: [{ by: "ops" }] },
     ]),
     ["_id", "profile", "profile.city", "profile.address", "profile.address.zip", "tags", "status", "audit", "audit.by"],
+  );
+});
+
+test("builds hierarchical document field path tree for array objects", () => {
+  const tree = documentFieldPathTreeFromDocuments([{ _id: "1", orders: [{ sku: "A", qty: 2 }], tags: ["a"], profile: { address: { zip: 1 } } }]);
+  const flattened = flattenDocumentFieldPathTree(tree);
+  const orders = tree.find((node) => node.path === "orders");
+  const sku = flattened.find((node) => node.path === "orders.sku");
+
+  assert.equal(orders?.kind, "array-object");
+  assert.equal(orders?.label, "orders[]");
+  assert.equal(sku?.path, "orders.sku");
+  assert.equal(sku?.displayPath, "orders[] > sku");
+  assert.deepEqual(
+    flattened.map((node) => node.path),
+    ["_id", "orders", "orders.sku", "orders.qty", "tags", "profile", "profile.address", "profile.address.zip"],
   );
 });
 
