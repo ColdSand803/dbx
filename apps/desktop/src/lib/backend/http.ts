@@ -75,6 +75,7 @@ import type {
   SqlFileProgress,
   TransferRequest,
   TransferProgress,
+  TransferOwnershipPreview,
   TableImportPreviewRequest,
   TableImportPreview,
   TableImportRequest,
@@ -1317,6 +1318,10 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
 
 export async function cancelTransfer(transferId: string): Promise<void> {
   return post("/api/transfer/cancel", { transferId });
+}
+
+export async function previewTransferOwnership(request: TransferRequest): Promise<TransferOwnershipPreview> {
+  return post("/api/transfer/ownership-preview", { request });
 }
 
 export interface SortTablesByFkOptions {

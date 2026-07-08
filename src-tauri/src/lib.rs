@@ -1105,6 +1105,7 @@ pub fn run() {
             commands::update::get_system_proxy_url,
             commands::update::download_and_install_update,
             commands::transfer::start_transfer,
+            commands::transfer::preview_transfer_ownership,
             commands::transfer::cancel_transfer,
             commands::database_export::export_database_sql,
             commands::database_export::cancel_database_export,

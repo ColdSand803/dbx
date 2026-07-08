@@ -507,6 +507,7 @@ async fn main() {
         .route("/ai/models", post(routes::ai::ai_list_models))
         // Transfer
         .route("/transfer/start", post(routes::transfer::start_transfer))
+        .route("/transfer/ownership-preview", post(routes::transfer::preview_transfer_ownership))
         .route("/transfer/progress/{transferId}", get(routes::transfer::transfer_progress))
         .route("/transfer/cancel", post(routes::transfer::cancel_transfer))
         .route("/transfer/sort-tables-by-fk", post(routes::transfer::sort_tables_by_fk_dependency))

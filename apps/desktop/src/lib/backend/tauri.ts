@@ -1889,6 +1889,7 @@ export async function listenSqlFileProgress(handler: (progress: SqlFileProgress)
 // --- Data Transfer ---
 export type TransferMode = "append" | "overwrite" | "upsert";
 export type TransferTableNameCase = "preserve" | "lower" | "upper";
+export type TransferOwnershipPolicy = "preserve" | "skip" | "reassignMissing";
 
 export interface TransferRequest {
   transferId: string;
@@ -1902,7 +1903,13 @@ export interface TransferRequest {
   createTable: boolean;
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
+  ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
+}
+
+export interface TransferOwnershipPreview {
+  missingOwners: string[];
+  targetOwner: string;
 }
 
 export interface TransferProgress {
@@ -1941,6 +1948,10 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
 
 export async function cancelTransfer(transferId: string): Promise<void> {
   return invoke("cancel_transfer", { transferId });
+}
+
+export async function previewTransferOwnership(request: TransferRequest): Promise<TransferOwnershipPreview> {
+  return invoke("preview_transfer_ownership", { request });
 }
 
 export interface SortTablesByFkOptions {

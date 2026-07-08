@@ -41,6 +41,15 @@ pub enum TransferTableNameCase {
     Upper,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferOwnershipPolicy {
+    #[default]
+    Preserve,
+    Skip,
+    ReassignMissing,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferRequest {
@@ -57,7 +66,16 @@ pub struct TransferRequest {
     pub mode: TransferMode,
     #[serde(default)]
     pub target_table_name_case: TransferTableNameCase,
+    #[serde(default)]
+    pub ownership_policy: TransferOwnershipPolicy,
     pub batch_size: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferOwnershipPreview {
+    pub missing_owners: Vec<String>,
+    pub target_owner: String,
 }
 
 impl TransferRequest {
@@ -795,12 +813,32 @@ struct PostgresMaterializedViewSource {
     source: String,
 }
 
+#[derive(Debug, Clone)]
+struct PostgresOwnershipStatement {
+    sql_prefix: String,
+    owner: String,
+}
+
 fn json_string_cell(row: &[serde_json::Value], index: usize) -> Option<String> {
     row.get(index).and_then(|value| value.as_str().map(str::to_string))
 }
 
 fn result_rows_to_string_statements(rows: Vec<Vec<serde_json::Value>>) -> Vec<String> {
     rows.into_iter().filter_map(|row| json_string_cell(&row, 0)).filter(|stmt| !stmt.trim().is_empty()).collect()
+}
+
+fn result_rows_to_postgres_ownership_statements(rows: Vec<Vec<serde_json::Value>>) -> Vec<PostgresOwnershipStatement> {
+    rows.into_iter()
+        .filter_map(|row| {
+            let sql_prefix = json_string_cell(&row, 0)?;
+            let owner = json_string_cell(&row, 1)?;
+            if sql_prefix.trim().is_empty() || owner.trim().is_empty() {
+                None
+            } else {
+                Some(PostgresOwnershipStatement { sql_prefix, owner })
+            }
+        })
+        .collect()
 }
 
 fn ensure_sql_statement_terminated(sql: &str) -> String {
@@ -3123,50 +3161,120 @@ async fn get_postgres_ownership_statements_for_transfer(
     source_schema: &str,
     target_schema: &str,
     tables: &[String],
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<PostgresOwnershipStatement>, String> {
     let table_list = tables.iter().map(|table| quote_string_literal(table)).collect::<Vec<_>>().join(", ");
     let table_filter = if tables.is_empty() { "FALSE".to_string() } else { format!("c.relname IN ({table_list})") };
     let sql = format!(
         "WITH relation_owners AS ( \
              SELECT CASE c.relkind \
-                      WHEN 'm' THEN format('ALTER MATERIALIZED VIEW %I.%I OWNER TO %I', {target_schema}, c.relname, pg_get_userbyid(c.relowner)) \
-                      WHEN 'v' THEN format('ALTER VIEW %I.%I OWNER TO %I', {target_schema}, c.relname, pg_get_userbyid(c.relowner)) \
-                      WHEN 'f' THEN format('ALTER FOREIGN TABLE %I.%I OWNER TO %I', {target_schema}, c.relname, pg_get_userbyid(c.relowner)) \
-                      WHEN 'S' THEN format('ALTER SEQUENCE %I.%I OWNER TO %I', {target_schema}, c.relname, pg_get_userbyid(c.relowner)) \
-                      ELSE format('ALTER TABLE %I.%I OWNER TO %I', {target_schema}, c.relname, pg_get_userbyid(c.relowner)) \
-                    END AS stmt \
+                      WHEN 'm' THEN format('ALTER MATERIALIZED VIEW %I.%I OWNER TO ', {target_schema}, c.relname) \
+                      WHEN 'v' THEN format('ALTER VIEW %I.%I OWNER TO ', {target_schema}, c.relname) \
+                      WHEN 'f' THEN format('ALTER FOREIGN TABLE %I.%I OWNER TO ', {target_schema}, c.relname) \
+                      WHEN 'S' THEN format('ALTER SEQUENCE %I.%I OWNER TO ', {target_schema}, c.relname) \
+                      ELSE format('ALTER TABLE %I.%I OWNER TO ', {target_schema}, c.relname) \
+                    END AS stmt_prefix, \
+                    pg_get_userbyid(c.relowner) AS owner_name \
              FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = {source_schema} AND (c.relkind IN ('v','m') OR ({table_filter} AND c.relkind IN ('r','p','f','S'))) \
          ), \
          routine_owners AS ( \
-             SELECT format('ALTER %s %I.%I(%s) OWNER TO %I', \
+             SELECT format('ALTER %s %I.%I(%s) OWNER TO ', \
                            CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, \
-                           {target_schema}, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner)) AS stmt \
+                           {target_schema}, p.proname, pg_get_function_identity_arguments(p.oid)) AS stmt_prefix, \
+                    pg_get_userbyid(p.proowner) AS owner_name \
              FROM pg_catalog.pg_proc p \
              JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname = {source_schema} AND p.prokind IN ('p','f') \
          ), \
          type_owners AS ( \
-             SELECT format('ALTER %s %I.%I OWNER TO %I', \
+             SELECT format('ALTER %s %I.%I OWNER TO ', \
                            CASE t.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END, \
-                           {target_schema}, t.typname, pg_get_userbyid(t.typowner)) AS stmt \
+                           {target_schema}, t.typname) AS stmt_prefix, \
+                    pg_get_userbyid(t.typowner) AS owner_name \
              FROM pg_catalog.pg_type t \
              JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
              WHERE n.nspname = {source_schema} AND t.typtype IN ('e','d') \
          ) \
-         SELECT stmt FROM ( \
-             SELECT format('ALTER SCHEMA %I OWNER TO %I', {target_schema}, pg_get_userbyid(n.nspowner)) AS stmt \
+         SELECT stmt_prefix, owner_name FROM ( \
+             SELECT format('ALTER SCHEMA %I OWNER TO ', {target_schema}) AS stmt_prefix, \
+                    pg_get_userbyid(n.nspowner) AS owner_name \
              FROM pg_catalog.pg_namespace n WHERE n.nspname = {source_schema} \
-             UNION ALL SELECT stmt FROM relation_owners \
-             UNION ALL SELECT stmt FROM routine_owners \
-             UNION ALL SELECT stmt FROM type_owners \
-         ) statements",
+             UNION ALL SELECT stmt_prefix, owner_name FROM relation_owners \
+             UNION ALL SELECT stmt_prefix, owner_name FROM routine_owners \
+             UNION ALL SELECT stmt_prefix, owner_name FROM type_owners \
+         ) statements \
+         WHERE stmt_prefix IS NOT NULL AND owner_name IS NOT NULL",
         source_schema = quote_string_literal(source_schema),
         target_schema = quote_string_literal(target_schema),
         table_filter = table_filter,
     );
-    Ok(result_rows_to_string_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
+    Ok(result_rows_to_postgres_ownership_statements(execute_on_pool(state, pool_key, &sql).await?.rows))
+}
+
+fn distinct_postgres_ownership_roles(statements: &[PostgresOwnershipStatement]) -> Vec<String> {
+    let mut roles = statements.iter().map(|statement| statement.owner.clone()).collect::<Vec<_>>();
+    roles.sort();
+    roles.dedup();
+    roles
+}
+
+async fn get_postgres_current_user(state: &AppState, target_pool_key: &str) -> Result<String, String> {
+    let rows = execute_on_pool(state, target_pool_key, "SELECT current_user").await?.rows;
+    rows.first()
+        .and_then(|row| json_string_cell(row, 0))
+        .filter(|user| !user.trim().is_empty())
+        .ok_or_else(|| "Failed to read target PostgreSQL current user".to_string())
+}
+
+async fn get_existing_postgres_roles(
+    state: &AppState,
+    target_pool_key: &str,
+    roles: &[String],
+) -> Result<HashSet<String>, String> {
+    if roles.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let role_list = roles.iter().map(|role| quote_string_literal(role)).collect::<Vec<_>>().join(", ");
+    let sql = format!("SELECT rolname FROM pg_catalog.pg_roles WHERE rolname IN ({role_list})");
+    let rows = execute_on_pool(state, target_pool_key, &sql).await?.rows;
+    Ok(rows.into_iter().filter_map(|row| json_string_cell(&row, 0)).collect())
+}
+
+fn build_postgres_ownership_statement(statement: &PostgresOwnershipStatement, owner: &str) -> String {
+    format!("{}{}", statement.sql_prefix, quote_identifier(owner, &DatabaseType::Postgres))
+}
+
+pub async fn preview_transfer_ownership(
+    state: &AppState,
+    request: &TransferRequest,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+) -> Result<TransferOwnershipPreview, String> {
+    if !request.create_table || !is_postgres_compat_transfer(source_db_type, target_db_type) {
+        return Ok(TransferOwnershipPreview { missing_owners: Vec::new(), target_owner: String::new() });
+    }
+
+    let statements = get_postgres_ownership_statements_for_transfer(
+        state,
+        source_pool_key,
+        &request.source_schema,
+        &request.target_schema,
+        &request.tables,
+    )
+    .await?;
+    let roles = distinct_postgres_ownership_roles(&statements);
+    let existing_roles = get_existing_postgres_roles(state, target_pool_key, &roles).await?;
+    let missing_owners = roles.into_iter().filter(|role| !existing_roles.contains(role)).collect::<Vec<_>>();
+    let target_owner = if missing_owners.is_empty() {
+        String::new()
+    } else {
+        get_postgres_current_user(state, target_pool_key).await?
+    };
+
+    Ok(TransferOwnershipPreview { missing_owners, target_owner })
 }
 
 async fn get_postgres_grant_statements_for_transfer(
@@ -4114,14 +4222,31 @@ where
         &request.tables,
     )
     .await?;
-    let ownership_statements = get_postgres_ownership_statements_for_transfer(
-        state,
-        source_pool_key,
-        &request.source_schema,
-        &request.target_schema,
-        &request.tables,
-    )
-    .await?;
+    let ownership_statements = if matches!(request.ownership_policy, TransferOwnershipPolicy::Skip) {
+        Vec::new()
+    } else {
+        get_postgres_ownership_statements_for_transfer(
+            state,
+            source_pool_key,
+            &request.source_schema,
+            &request.target_schema,
+            &request.tables,
+        )
+        .await?
+    };
+    let ownership_existing_roles = if matches!(request.ownership_policy, TransferOwnershipPolicy::ReassignMissing) {
+        let roles = distinct_postgres_ownership_roles(&ownership_statements);
+        get_existing_postgres_roles(state, target_pool_key, &roles).await?
+    } else {
+        HashSet::new()
+    };
+    let ownership_target_user = if matches!(request.ownership_policy, TransferOwnershipPolicy::ReassignMissing)
+        && !ownership_statements.is_empty()
+    {
+        Some(get_postgres_current_user(state, target_pool_key).await?)
+    } else {
+        None
+    };
     let grant_statements = get_postgres_grant_statements_for_transfer(
         state,
         source_pool_key,
@@ -4286,7 +4411,17 @@ where
             status: TransferStatus::Running,
             error: None,
         });
-        execute_on_pool(state, target_pool_key, &statement)
+        let ownership_owner = if matches!(request.ownership_policy, TransferOwnershipPolicy::ReassignMissing)
+            && !ownership_existing_roles.contains(&statement.owner)
+        {
+            ownership_target_user
+                .as_deref()
+                .ok_or_else(|| "Failed to read target PostgreSQL current user".to_string())?
+        } else {
+            &statement.owner
+        };
+        let ownership_sql = build_postgres_ownership_statement(&statement, ownership_owner);
+        execute_on_pool(state, target_pool_key, &ownership_sql)
             .await
             .map_err(|e| format!("Failed to apply PostgreSQL ownership statement: {e}"))?;
     }
@@ -4431,6 +4566,7 @@ mod tests {
             create_table: true,
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 1000,
         }
     }
