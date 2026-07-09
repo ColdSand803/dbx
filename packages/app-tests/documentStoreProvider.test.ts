@@ -1,6 +1,17 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildDocumentFilterCondition, combineDocumentFilterConditions, currentDocumentFilterJson, documentStoreProviderFor, elasticsearchSearchBodyFromDocumentQuery, type DocumentFilterRule } from "../../apps/desktop/src/lib/app/documentStoreProvider.ts";
+import {
+  buildDocumentFilterCondition,
+  combineDocumentFilterConditions,
+  currentDocumentFilterJson,
+  documentFieldPathOptionsFromDocuments,
+  documentFieldPathTreeFromDocuments,
+  documentStoreProviderFor,
+  elasticsearchSearchBodyFromDocumentQuery,
+  flattenDocumentFieldPathTree,
+  formatDocumentQueryInput,
+  type DocumentFilterRule,
+} from "../../apps/desktop/src/lib/app/documentStoreProvider.ts";
 
 function rule(patch: Partial<DocumentFilterRule>): DocumentFilterRule {
   return {
@@ -43,6 +54,35 @@ test("builds reusable document filter conditions", () => {
   assert.deepEqual(buildDocumentFilterCondition(rule({ mode: "is-not-null", rawValue: "" })), { city: { $ne: null } });
 });
 
+test("extracts nested document field paths for structured filters", () => {
+  assert.deepEqual(
+    documentFieldPathOptionsFromDocuments([
+      { _id: "1", profile: { city: "上海", address: { zip: 200000 } }, tags: ["a"] },
+      { _id: "2", status: "active", profile: { city: "北京" }, audit: [{ by: "ops" }] },
+    ]),
+    ["_id", "profile", "profile.city", "profile.address", "profile.address.zip", "tags", "status", "audit", "audit.by"],
+  );
+});
+
+test("builds hierarchical document field path tree for array objects", () => {
+  const tree = documentFieldPathTreeFromDocuments([{ _id: "1", orders: [{ sku: "A", qty: 2 }], tags: ["a"], profile: { address: { zip: 1 } } }]);
+  const flattened = flattenDocumentFieldPathTree(tree);
+  const orders = tree.find((node) => node.path === "orders");
+  const sku = flattened.find((node) => node.path === "orders.sku");
+
+  assert.equal(orders?.kind, "array-object");
+  assert.equal(orders?.label, "orders[]");
+  assert.equal(sku?.path, "orders.sku");
+  assert.equal(sku?.displayPath, "orders[] > sku");
+  assert.deepEqual(
+    flattened.map((node) => node.path),
+    ["_id", "orders", "orders.sku", "orders.qty", "tags", "profile", "profile.address", "profile.address.zip"],
+  );
+});
+
+test("formats document query object input", () => {
+  assert.equal(formatDocumentQueryInput('{profile:{city:"上海"},status:"active"}', "mongodb"), ['{', '  "profile": {', '    "city": "上海"', '  },', '  "status": "active"', '}'].join("\n"));
+});
 test("preserves MongoDB int64 document filter values", () => {
   const id = "2048938405781032962";
   const firstUnsafeInteger = "9007199254740993";

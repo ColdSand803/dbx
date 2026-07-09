@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronLeft, ChevronRight, Table2, Braces, X, Columns3, Check, Search, Wrench, Filter } from "@lucide/vue";
+import { RefreshCw, RefreshCcw, Loader2, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Columns3, Check, Search, Wrench, Filter } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -22,9 +22,14 @@ import {
   currentDocumentFilterJson,
   currentDocumentSortJson,
   defaultDocumentFilterRule,
+  documentFieldPathOptionsFromDocuments,
+  documentFieldPathTreeFromDocuments,
+  flattenDocumentFieldPathTree,
   documentFilterModeNeedsValue,
   documentFilterModeOptions,
   documentStoreProviderFor,
+  formatDocumentQueryInput,
+  type DocumentFieldPathNode,
   type DocumentFilterMode,
   type DocumentFilterRule,
 } from "@/lib/app/documentStoreProvider";
@@ -74,6 +79,8 @@ const viewMode = computed<ViewMode>({
 });
 const filterInput = ref("");
 const sortInput = ref("");
+const filterInputRef = ref<HTMLTextAreaElement>();
+const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
 const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
@@ -101,6 +108,7 @@ type LocalFilterSummary = {
   values: string[];
   hiddenValueCount: number;
 };
+type DocumentFilterFieldTreeRow = DocumentFieldPathNode & { depth: number };
 type DocumentGridChanges = {
   dirtyRows: Map<number, Map<number, MongoInputValue>>;
   deletedRows: Set<number>;
@@ -109,6 +117,7 @@ type DocumentGridChanges = {
   rows: MongoInputValue[][];
 };
 const documentFilterBuilderOpen = ref(false);
+const documentFilterFieldPopoverOpen = ref<Record<string, boolean>>({});
 const documentFilterRules = ref<DocumentFilterRule[]>([]);
 const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
 
@@ -170,7 +179,26 @@ const gridResult = computed<QueryResult>(() => {
 
   return { columns, rows, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
-const documentFilterFieldOptions = computed(() => gridResult.value.columns);
+const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
+const documentFilterFieldTree = computed<DocumentFieldPathNode[]>(() => {
+  const tree = documentFieldPathTreeFromDocuments(documents.value);
+  if (tree.length > 0) return tree;
+  return gridResult.value.columns.map((column) => ({
+    key: column,
+    path: column,
+    label: column,
+    displayPath: column,
+    kind: "scalar",
+    selectable: true,
+    children: [],
+  }));
+});
+const documentFilterFieldOptions = computed(() => {
+  const nestedFields = documentFieldPathOptionsFromDocuments(documents.value);
+  return nestedFields.length > 0 ? nestedFields : gridResult.value.columns;
+});
+const documentFilterFieldRows = computed<DocumentFilterFieldTreeRow[]>(() => visibleDocumentFilterFieldRows(documentFilterFieldTree.value));
+const documentFilterFieldByPath = computed(() => new Map(flattenDocumentFieldPathTree(documentFilterFieldTree.value).map((node) => [node.path, node])));
 const documentStructuredFilterCount = computed(() => (appliedDocumentFilter.value ? 1 : 0));
 const documentLoadingLabelKey = computed(() => (documentLoadCancelling.value ? "common.stopping" : "common.loading"));
 let documentLoadingTimer: ReturnType<typeof setInterval> | undefined;
@@ -190,8 +218,48 @@ function addDocumentFilterRule() {
   documentFilterRules.value = [...documentFilterRules.value, createDocumentFilterRule()];
 }
 
+function visibleDocumentFilterFieldRows(nodes: readonly DocumentFieldPathNode[], depth = 0): DocumentFilterFieldTreeRow[] {
+  const rows: DocumentFilterFieldTreeRow[] = [];
+  for (const node of nodes) {
+    rows.push({ ...node, depth });
+    if (node.children.length > 0 && expandedDocumentFilterFieldPaths.value.has(node.path)) {
+      rows.push(...visibleDocumentFilterFieldRows(node.children, depth + 1));
+    }
+  }
+  return rows;
+}
+
+function toggleDocumentFilterFieldExpanded(path: string) {
+  const next = new Set(expandedDocumentFilterFieldPaths.value);
+  if (next.has(path)) next.delete(path);
+  else next.add(path);
+  expandedDocumentFilterFieldPaths.value = next;
+}
+
+function setDocumentFilterFieldPopoverOpen(ruleId: string, open: boolean) {
+  const next = { ...documentFilterFieldPopoverOpen.value };
+  if (open) next[ruleId] = true;
+  else delete next[ruleId];
+  documentFilterFieldPopoverOpen.value = next;
+}
+
+function selectDocumentFilterField(ruleId: string, fieldName: string) {
+  updateDocumentFilterRule(ruleId, { fieldName });
+  setDocumentFilterFieldPopoverOpen(ruleId, false);
+}
+
+function documentFilterFieldLabel(path: string): string {
+  return documentFilterFieldByPath.value.get(path)?.displayPath ?? path;
+}
+
+function documentFilterFieldKindLabel(kind: DocumentFieldPathNode["kind"]): string {
+  if (kind === "array-object") return "array object";
+  return kind;
+}
+
 function removeDocumentFilterRule(ruleId: string) {
   documentFilterRules.value = documentFilterRules.value.filter((rule) => rule.id !== ruleId);
+  setDocumentFilterFieldPopoverOpen(ruleId, false);
   if (documentFilterRules.value.length === 0) appliedDocumentFilter.value = null;
 }
 
@@ -206,12 +274,48 @@ function updateDocumentFilterRule(ruleId: string, patch: Partial<DocumentFilterR
 
 function resetDocumentFilterBuilder() {
   appliedDocumentFilter.value = null;
+  documentFilterFieldPopoverOpen.value = {};
   documentFilterRules.value = documentFilterFieldOptions.value.length > 0 ? [createDocumentFilterRule()] : [];
 }
 
 function currentDocumentFilter(): string | undefined {
   return currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind);
 }
+
+function resizeDocumentQueryInput(el: HTMLTextAreaElement | undefined) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${Math.min(Math.max(el.scrollHeight, 20), 120)}px`;
+}
+
+function resizeDocumentQueryInputs() {
+  resizeDocumentQueryInput(filterInputRef.value);
+  resizeDocumentQueryInput(sortInputRef.value);
+}
+
+function formatFilterInput() {
+  try {
+    filterInput.value = formatDocumentQueryInput(filterInput.value, documentStoreProvider.value.kind);
+    error.value = "";
+    void nextTick(resizeDocumentQueryInputs);
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+function formatSortInput() {
+  try {
+    sortInput.value = formatDocumentQueryInput(sortInput.value);
+    error.value = "";
+    void nextTick(resizeDocumentQueryInputs);
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
+watch([filterInput, sortInput], () => {
+  void nextTick(resizeDocumentQueryInputs);
+});
 
 const documentQueryPreview = computed(() => {
   let filter = "{}";
@@ -778,6 +882,7 @@ onMounted(async () => {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
   load();
+  void nextTick(resizeDocumentQueryInputs);
 });
 onBeforeUnmount(() => {
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
@@ -956,7 +1061,7 @@ function resetTableSearchSplitWidth() {
     >
       <template #search-bar="{ localFilterCount, hasLocalColumnFilters, localFilterSummaries, clearLocalFilter }: { localFilterCount: number; hasLocalColumnFilters: boolean; localFilterSummaries: LocalFilterSummary[]; clearLocalFilter: (columnIndex?: number) => void }">
         <div ref="tableSearchSplitContainerRef" class="flex flex-1 min-w-0">
-          <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0" :style="tableFindPaneStyle">
+          <div class="flex flex-1 items-start gap-1 px-2 py-0.5 min-w-0" :style="tableFindPaneStyle">
             <Popover v-model:open="documentFilterBuilderOpen">
               <PopoverTrigger as-child>
                 <button
@@ -1028,16 +1133,38 @@ function resetTableSearchSplitWidth() {
                       </Button>
                     </div>
                     <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)_minmax(0,1fr)_auto] items-center gap-1.5">
-                      <Select :model-value="rule.fieldName" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { fieldName: String(value) })">
-                        <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
-                          <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
-                        </SelectTrigger>
-                        <SelectContent position="popper">
-                          <SelectItem v-for="fieldName in documentFilterFieldOptions" :key="fieldName" :value="fieldName">
-                            {{ fieldName }}
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
+                      <Popover :open="!!documentFilterFieldPopoverOpen[rule.id]" @update:open="(open) => setDocumentFilterFieldPopoverOpen(rule.id, open)">
+                        <PopoverTrigger as-child>
+                          <button type="button" class="flex h-8 w-full min-w-0 items-center justify-between gap-1 rounded-md border bg-background px-2 text-left text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+                            <span class="min-w-0 truncate font-mono" :title="documentFilterFieldLabel(rule.fieldName)">{{ documentFilterFieldLabel(rule.fieldName) || t("grid.filterBuilderColumn") }}</span>
+                            <ChevronDown class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="start" class="w-72 max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-lg" @click.stop @keydown.stop>
+                          <div class="border-b bg-muted/40 px-2 py-1.5 text-xs font-medium text-foreground">{{ t("grid.filterBuilderColumn") }}</div>
+                          <div class="max-h-72 overflow-auto py-1">
+                            <div v-for="field in documentFilterFieldRows" :key="field.path" class="flex items-center gap-1 px-1.5">
+                              <button
+                                type="button"
+                                class="flex h-7 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                                :class="{ invisible: field.children.length === 0 }"
+                                :style="{ marginLeft: `${field.depth * 14}px` }"
+                                @click.stop="toggleDocumentFilterFieldExpanded(field.path)"
+                              >
+                                <ChevronRight v-if="!expandedDocumentFilterFieldPaths.has(field.path)" class="h-3.5 w-3.5" />
+                                <ChevronDown v-else class="h-3.5 w-3.5" />
+                              </button>
+                              <button type="button" class="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 text-left text-xs hover:bg-accent" :class="rule.fieldName === field.path ? 'bg-accent text-foreground' : ''" @click="selectDocumentFilterField(rule.id, field.path)">
+                                <span class="min-w-0 flex-1 truncate font-mono" :title="field.displayPath">{{ field.label }}</span>
+                                <span v-if="field.kind !== 'scalar'" class="shrink-0 rounded border px-1 py-0 text-[10px] leading-4 text-muted-foreground">{{ documentFilterFieldKindLabel(field.kind) }}</span>
+                              </button>
+                            </div>
+                            <div v-if="documentFilterFieldRows.length === 0" class="px-3 py-6 text-center text-xs text-muted-foreground">
+                              {{ t("grid.noSearchResults") }}
+                            </div>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
 
                       <Select :model-value="rule.mode" @update:model-value="(value: any) => updateDocumentFilterRule(rule.id, { mode: value as DocumentFilterMode })">
                         <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
@@ -1087,11 +1214,26 @@ function resetTableSearchSplitWidth() {
                 </div>
               </PopoverContent>
             </Popover>
-            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.filterInputLabel }}</span>
-            <input v-model="filterInput" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono" placeholder="{}" @keydown.enter="applyFilter" />
+            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0 pt-0.5">{{ documentStoreProvider.filterInputLabel }}</span>
+            <textarea
+              ref="filterInputRef"
+              v-model="filterInput"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              rows="1"
+              class="document-query-input flex-1 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono"
+              placeholder="{}"
+              @keydown.ctrl.enter.prevent="applyFilter"
+              @keydown.meta.enter.prevent="applyFilter"
+            />
+            <button v-if="filterInput.trim()" type="button" class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5" title="Format JSON" aria-label="Format JSON" @click="formatFilterInput">
+              <Braces class="w-3 h-3" />
+            </button>
             <button
               v-if="filterInput.trim()"
-              class="text-muted-foreground hover:text-foreground shrink-0"
+              type="button"
+              class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5"
               @click="
                 filterInput = '';
                 applyFilter();
@@ -1109,12 +1251,27 @@ function resetTableSearchSplitWidth() {
           >
             <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
           </button>
-          <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0">
-            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0">{{ documentStoreProvider.sortInputLabel }}</span>
-            <input v-model="sortInput" autocapitalize="off" autocorrect="off" spellcheck="false" class="flex-1 h-5 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono" placeholder="{}" @keydown.enter="applyFilter" />
+          <div class="flex flex-1 items-start gap-1 px-2 py-0.5 min-w-0">
+            <span class="text-orange-600 dark:text-orange-400 text-xs font-medium select-none shrink-0 pt-0.5">{{ documentStoreProvider.sortInputLabel }}</span>
+            <textarea
+              ref="sortInputRef"
+              v-model="sortInput"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              rows="1"
+              class="document-query-input flex-1 min-w-0 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 font-mono"
+              placeholder="{}"
+              @keydown.ctrl.enter.prevent="applyFilter"
+              @keydown.meta.enter.prevent="applyFilter"
+            />
+            <button v-if="sortInput.trim()" type="button" class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5" title="Format JSON" aria-label="Format JSON" @click="formatSortInput">
+              <Braces class="w-3 h-3" />
+            </button>
             <button
               v-if="sortInput.trim()"
-              class="text-muted-foreground hover:text-foreground shrink-0"
+              type="button"
+              class="text-muted-foreground hover:text-foreground shrink-0 mt-0.5"
               @click="
                 sortInput = '';
                 applyFilter();
@@ -1190,6 +1347,15 @@ function resetTableSearchSplitWidth() {
 </template>
 
 <style scoped>
+.document-query-input {
+  min-height: 20px;
+  max-height: 120px;
+  line-height: 1.25rem;
+  resize: none;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
 .json-viewer {
   font-family: var(--dbx-editor-font-family);
   font-size: var(--dbx-editor-font-size);

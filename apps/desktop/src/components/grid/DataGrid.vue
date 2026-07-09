@@ -192,6 +192,7 @@ type ConditionSuggestion = {
 };
 
 type SortMenuValue = "local-asc" | "local-desc" | "database-asc" | "database-desc" | "clear";
+type DetailValueViewMode = "raw" | "json";
 
 const props = defineProps<{
   result: QueryResult;
@@ -469,6 +470,9 @@ const columnDetailDialogOpen = ref(false);
 const columnDetailDialogColumnIndex = ref<number | null>(null);
 const rowDetailSearch = ref("");
 const columnDetailSearch = ref("");
+const rowDetailValueView = ref<DetailValueViewMode>("raw");
+const rowDetailFieldJsonView = ref<Record<string, boolean>>({});
+const columnDetailValueView = ref<DetailValueViewMode>("raw");
 const isResizingDetail = ref(false);
 const imagePreviewOpen = ref(false);
 const imagePreviewSrc = ref("");
@@ -4708,8 +4712,12 @@ const columnDetail = computed(() => {
 });
 
 const filteredRowDetailFields = computed(() => (rowDetail.value ? filterDataGridDetailFields(rowDetail.value.fields, rowDetailSearch.value) : []));
+const rowDetailJsonView = computed(() => rowDetailValueView.value === "json" && !!rowDetail.value);
+const rowDetailJsonText = computed(() => (rowDetail.value ? dataGridRowDetailJson(rowDetail.value) : ""));
 
 const filteredColumnDetailFields = computed(() => (columnDetail.value ? filterDataGridDetailFields(columnDetail.value.fields, columnDetailSearch.value) : []));
+const columnDetailHasFormattedJson = computed(() => filteredColumnDetailFields.value.some((field) => !!field.formattedJson));
+const columnDetailJsonView = computed(() => columnDetailValueView.value === "json" && columnDetailHasFormattedJson.value);
 
 watch(cellDetailDialogOpen, (open) => {
   if (!open) cellDetailDialogTarget.value = null;
@@ -4719,6 +4727,8 @@ watch(rowDetailDialogOpen, (open) => {
   if (!open) {
     rowDetailDialogRowId.value = null;
     rowDetailSearch.value = "";
+    rowDetailValueView.value = "raw";
+    rowDetailFieldJsonView.value = {};
   }
 });
 
@@ -4726,6 +4736,7 @@ watch(columnDetailDialogOpen, (open) => {
   if (!open) {
     columnDetailDialogColumnIndex.value = null;
     columnDetailSearch.value = "";
+    columnDetailValueView.value = "raw";
   }
 });
 
@@ -6240,6 +6251,8 @@ function openActiveColumnDetailDialog() {
 
 function openRowDetailDialog(rowId: number) {
   rowDetailDialogRowId.value = rowId;
+  rowDetailValueView.value = "raw";
+  rowDetailFieldJsonView.value = {};
   rowDetailDialogOpen.value = true;
 }
 
@@ -6969,8 +6982,26 @@ function copyRowDetailTsv() {
   copyText(dataGridRowDetailTsv(detail));
 }
 
+function rowDetailFieldKey(field: DataGridCellDetail) {
+  return `${field.rowId}:${field.colIndex}:${field.column}`;
+}
+
+function rowDetailFieldJsonViewActive(field: DataGridCellDetail) {
+  return !!field.formattedJson && !!rowDetailFieldJsonView.value[rowDetailFieldKey(field)];
+}
+
+function toggleRowDetailFieldJsonView(field: DataGridCellDetail) {
+  if (!field.formattedJson) return;
+  const key = rowDetailFieldKey(field);
+  rowDetailFieldJsonView.value = { ...rowDetailFieldJsonView.value, [key]: !rowDetailFieldJsonView.value[key] };
+}
+
 function copyRowDetailFieldValue(field: DataGridCellDetail) {
-  copyText(field.value === null ? "" : displayCellValue(field.value));
+  if (rowDetailFieldJsonViewActive(field)) {
+    copyText(field.formattedJson);
+  } else {
+    copyText(field.value === null ? "" : displayCellValue(field.value));
+  }
 }
 
 function copyColumnDetailJson() {
@@ -10522,22 +10553,33 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           </DialogTitle>
         </DialogHeader>
 
-        <div class="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+        <div class="flex shrink-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span class="whitespace-nowrap">{{ t("grid.columnsCount", { count: rowDetail.fields.length }) }}</span>
-          <div class="relative ml-auto w-56 max-w-full">
+          <div class="ml-auto flex shrink-0 rounded-md border bg-background p-0.5">
+            <Button :variant="!rowDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 px-2 text-xs" :aria-pressed="!rowDetailJsonView" @click="rowDetailValueView = 'raw'">
+              {{ t("grid.tableView") }}
+            </Button>
+            <Button :variant="rowDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 px-2 text-xs" :aria-pressed="rowDetailJsonView" @click="rowDetailValueView = 'json'">
+              {{ t("grid.formattedJson") }}
+            </Button>
+          </div>
+          <div v-if="!rowDetailJsonView" class="relative w-56 max-w-full">
             <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input v-model="rowDetailSearch" :placeholder="t('grid.detailSearchPlaceholder')" class="h-7 pl-7 text-xs" />
           </div>
         </div>
 
-        <div class="min-h-0 flex-1 overflow-auto rounded border">
+        <div v-if="rowDetailJsonView" class="min-h-0 flex-1 overflow-auto rounded border bg-muted/20">
+          <pre class="p-3 font-mono text-xs whitespace-pre-wrap break-words">{{ rowDetailJsonText }}</pre>
+        </div>
+        <div v-else class="min-h-0 flex-1 overflow-auto rounded border">
           <table class="w-full min-w-[640px] text-xs">
             <thead class="sticky top-0 z-10 bg-muted text-muted-foreground">
               <tr class="border-b">
                 <th class="w-16 px-3 py-2 text-left font-medium">{{ t("grid.fieldIndex") }}</th>
                 <th class="w-56 px-3 py-2 text-left font-medium">{{ t("grid.columnName") }}</th>
                 <th class="px-3 py-2 text-left font-medium">{{ t("grid.cellValue") }}</th>
-                <th class="w-10 px-2 py-2"></th>
+                <th class="w-28 px-2 py-2"></th>
               </tr>
             </thead>
             <tbody>
@@ -10560,19 +10602,29 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-48 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)">
                     <img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-48 w-full object-contain" />
                   </a>
-                  <pre class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
-                  <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">
+                  <pre v-if="rowDetailFieldJsonViewActive(field)" class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
+                  <pre v-else class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
+                  <div v-if="field.isValuePreviewTruncated && !rowDetailFieldJsonViewActive(field)" class="mt-1 text-[11px] text-muted-foreground">
                     {{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}
-                  </div>
-                  <div v-if="field.formattedJson" class="mt-2 space-y-1">
-                    <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
-                    <pre class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
                   </div>
                 </td>
                 <td class="px-2 py-2">
-                  <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.copyValue')" @click="copyRowDetailFieldValue(field)">
-                    <Copy class="h-3 w-3" />
-                  </Button>
+                  <div class="flex justify-end gap-1">
+                    <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.copyValue')" @click="copyRowDetailFieldValue(field)">
+                      <Copy class="h-3 w-3" />
+                    </Button>
+                    <Button
+                      v-if="field.formattedJson"
+                      :variant="rowDetailFieldJsonViewActive(field) ? 'secondary' : 'ghost'"
+                      size="sm"
+                      class="h-6 px-1.5 text-[11px]"
+                      :title="rowDetailFieldJsonViewActive(field) ? t('grid.rawValue') : t('grid.formattedJson')"
+                      :aria-pressed="rowDetailFieldJsonViewActive(field)"
+                      @click="toggleRowDetailFieldJsonView(field)"
+                    >
+                      {{ rowDetailFieldJsonViewActive(field) ? t("grid.rawValue") : t("grid.formattedJson") }}
+                    </Button>
+                  </div>
                 </td>
               </tr>
             </tbody>
@@ -10623,9 +10675,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           </div>
         </div>
 
-        <div class="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+        <div class="flex shrink-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span class="whitespace-nowrap">{{ t("grid.rowCount") }}: {{ columnDetail.fields.length }}</span>
-          <div class="relative ml-auto w-56 max-w-full">
+          <div v-if="columnDetailHasFormattedJson" class="ml-auto flex shrink-0 rounded-md border bg-background p-0.5">
+            <Button :variant="!columnDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 px-2 text-xs" :aria-pressed="!columnDetailJsonView" @click="columnDetailValueView = 'raw'">
+              {{ t("grid.tableView") }}
+            </Button>
+            <Button :variant="columnDetailJsonView ? 'secondary' : 'ghost'" size="sm" class="h-6 px-2 text-xs" :aria-pressed="columnDetailJsonView" @click="columnDetailValueView = 'json'">
+              {{ t("grid.formattedJson") }}
+            </Button>
+          </div>
+          <div class="relative w-56 max-w-full" :class="{ 'ml-auto': !columnDetailHasFormattedJson }">
             <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input v-model="columnDetailSearch" :placeholder="t('grid.detailSearchPlaceholder')" class="h-7 pl-7 text-xs" />
           </div>
@@ -10651,13 +10711,10 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-40 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)">
                     <img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-40 w-full object-contain" />
                   </a>
-                  <pre class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
-                  <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">
+                  <pre v-if="columnDetailJsonView && field.formattedJson" class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
+                  <pre v-else class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
+                  <div v-if="field.isValuePreviewTruncated && !(columnDetailJsonView && field.formattedJson)" class="mt-1 text-[11px] text-muted-foreground">
                     {{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}
-                  </div>
-                  <div v-if="field.formattedJson" class="mt-2 space-y-1">
-                    <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
-                    <pre class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
                   </div>
                 </td>
                 <td class="px-2 py-2">
