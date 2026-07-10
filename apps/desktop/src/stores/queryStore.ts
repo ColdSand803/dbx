@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
-import { markRaw, ref, watch, computed } from "vue";
+import { computed, markRaw, nextTick, onScopeDispose, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { DatabaseType, ObjectBrowserViewport, QueryResult, QueryTab, TableInfoTab, TableStructureEditorTarget } from "@/types/database";
 import { orderPinnedFirst } from "@/lib/app/pinnedItems";
@@ -765,11 +765,17 @@ export const useQueryStore = defineStore("query", () => {
     { flush: "post" },
   );
 
+  onScopeDispose(() => {
+    if (_persistTimer) clearTimeout(_persistTimer);
+    _persistTimer = null;
+  });
+
   // Immediately flush any pending debounced persist so the on-disk content
   // reflects the latest in-memory tabs without waiting for the 300ms debounce.
   // Lets callers (e.g. tests that reload the store) read back persisted state
   // deterministically instead of racing the debounce timer.
-  function flushPendingPersist(): Promise<void> {
+  async function flushPendingPersist(): Promise<void> {
+    await nextTick();
     if (_persistTimer) {
       clearTimeout(_persistTimer);
       _persistTimer = null;

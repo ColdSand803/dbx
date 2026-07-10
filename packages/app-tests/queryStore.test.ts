@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
-import { test } from "vitest";
-import { createPinia, setActivePinia } from "pinia";
+import { afterEach, test } from "vitest";
+import { createPinia, disposePinia, getActivePinia, setActivePinia } from "pinia";
 import { isReactive } from "vue";
 import { decodeQueryResultArchive } from "../../apps/desktop/src/lib/query/queryResultArchive.ts";
 import { resultSqlForGrid } from "../../apps/desktop/src/lib/tabs/tabPresentation.ts";
@@ -10,6 +10,11 @@ import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts
 import type { ConnectionConfig } from "../../apps/desktop/src/types/database.ts";
 import type { QueryResult } from "../../apps/desktop/src/types/database.ts";
 
+afterEach(() => {
+  const pinia = getActivePinia();
+  if (pinia) disposePinia(pinia);
+  setActivePinia(undefined);
+});
 function installMemoryStorage() {
   const values = new Map<string, string>();
   const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
