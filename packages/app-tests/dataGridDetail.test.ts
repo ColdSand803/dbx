@@ -205,6 +205,22 @@ test("dataGridRowDetailJson and dataGridRowDetailTsv format copy payloads", () =
   assert.equal(dataGridRowDetailTsv(detail), "1\tAda\tNULL");
 });
 
+test("dataGridRowDetailJson embeds nested JSON cell values", () => {
+  const detail = buildDataGridRowDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: ['{"profile":{"city":"Shanghai"},"items":[{"id":1}]}'],
+    columns: ["document"],
+    columnIndexes: [0],
+    displayValue: (value) => String(value),
+  });
+
+  assert.equal(
+    dataGridRowDetailJson(detail),
+    '{\n  "document": {\n    "profile": {\n      "city": "Shanghai"\n    },\n    "items": [\n      {\n        "id": 1\n      }\n    ]\n  }\n}',
+  );
+});
+
 test("buildDataGridColumnDetail maps a whole column across rows", () => {
   const typeByColumn = new Map([["name", "varchar"]]);
   const commentByColumn = new Map([["name", "display name"]]);

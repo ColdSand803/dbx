@@ -2,7 +2,7 @@
 import { computed, ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Columns3, Check, Search, Wrench, Filter } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Table2, Braces, X, Columns3, Check, Search, Wrench, Filter } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -25,6 +25,7 @@ import {
   documentFieldPathOptionsFromDocuments,
   documentFieldPathTreeFromDocuments,
   flattenDocumentFieldPathTree,
+  searchDocumentFieldPathTree,
   documentFilterModeNeedsValue,
   documentFilterModeOptions,
   documentStoreProviderFor,
@@ -35,6 +36,7 @@ import {
 } from "@/lib/app/documentStoreProvider";
 import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
+import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
 import { useSettingsStore } from "@/stores/settingsStore";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
@@ -82,6 +84,12 @@ const sortInput = ref("");
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
+const documentViewerRef = ref<HTMLElement>();
+const documentSearchInputRef = ref<HTMLInputElement>();
+const documentSearchOpen = ref(false);
+const documentSearchQuery = ref("");
+const documentSearchMatchIndex = ref(0);
+const documentViewerSearchActive = ref(false);
 const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
 const tableSearchSplitContainerRef = ref<HTMLDivElement>();
@@ -118,6 +126,7 @@ type DocumentGridChanges = {
 };
 const documentFilterBuilderOpen = ref(false);
 const documentFilterFieldPopoverOpen = ref<Record<string, boolean>>({});
+const documentFilterFieldSearch = ref<Record<string, string>>({});
 const documentFilterRules = ref<DocumentFilterRule[]>([]);
 const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
 
@@ -126,6 +135,15 @@ const pendingDelete = ref<PendingDelete | null>(null);
 const selectedDoc = computed(() => {
   if (selectedIdx.value === null) return null;
   return documents.value[selectedIdx.value] ?? null;
+});
+const documentSearchMatches = computed(() => findDocumentTextMatches(editJson.value, documentSearchQuery.value));
+const documentSearchActiveIndex = computed(() => {
+  if (documentSearchMatches.value.length === 0) return 0;
+  return Math.min(documentSearchMatchIndex.value, documentSearchMatches.value.length - 1);
+});
+const documentSearchStatus = computed(() => {
+  const count = documentSearchMatches.value.length;
+  return count > 0 ? `${documentSearchActiveIndex.value + 1}/${count}` : "0/0";
 });
 
 const editKeyWidth = computed(() => {
@@ -241,6 +259,21 @@ function setDocumentFilterFieldPopoverOpen(ruleId: string, open: boolean) {
   if (open) next[ruleId] = true;
   else delete next[ruleId];
   documentFilterFieldPopoverOpen.value = next;
+  if (!open) {
+    const search = { ...documentFilterFieldSearch.value };
+    delete search[ruleId];
+    documentFilterFieldSearch.value = search;
+  }
+}
+
+function documentFilterFieldSearchActive(ruleId: string): boolean {
+  return !!documentFilterFieldSearch.value[ruleId]?.trim();
+}
+
+function documentFilterFieldRowsForRule(ruleId: string): DocumentFilterFieldTreeRow[] {
+  const query = documentFilterFieldSearch.value[ruleId] ?? "";
+  if (!query.trim()) return documentFilterFieldRows.value;
+  return searchDocumentFieldPathTree(documentFilterFieldTree.value, query).map((node) => ({ ...node, depth: 0 }));
 }
 
 function selectDocumentFilterField(ruleId: string, fieldName: string) {
@@ -275,6 +308,7 @@ function updateDocumentFilterRule(ruleId: string, patch: Partial<DocumentFilterR
 function resetDocumentFilterBuilder() {
   appliedDocumentFilter.value = null;
   documentFilterFieldPopoverOpen.value = {};
+  documentFilterFieldSearch.value = {};
   documentFilterRules.value = documentFilterFieldOptions.value.length > 0 ? [createDocumentFilterRule()] : [];
 }
 
@@ -864,18 +898,54 @@ function docPreview(doc: JsonRecord): string {
 }
 
 function highlightedJson(json: string): string {
-  const escaped = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-  return escaped.replace(/("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g, (match) => {
-    let cls = "json-number";
-    if (match.startsWith('"')) cls = match.endsWith(":") ? "json-key" : "json-string";
-    else if (match === "true" || match === "false") cls = "json-boolean";
-    else if (match === "null") cls = "json-null";
-    return `<span class="${cls}">${match}</span>`;
-  });
+  return renderDocumentJsonHtml(json, documentSearchOpen.value ? documentSearchQuery.value : "", documentSearchActiveIndex.value);
 }
 
+function handleDocumentBrowserPointerDown(event: PointerEvent) {
+  const target = event.target;
+  documentViewerSearchActive.value = target instanceof Element && !!target.closest("[data-document-json-viewer], [data-document-search]");
+}
+
+function focusSearch(): boolean {
+  if (viewMode.value !== "document" || isEditing.value || selectedIdx.value === null || !documentViewerSearchActive.value) return false;
+  documentSearchOpen.value = true;
+  void nextTick(() => {
+    documentSearchInputRef.value?.focus();
+    documentSearchInputRef.value?.select();
+  });
+  return true;
+}
+
+function closeDocumentSearch() {
+  documentSearchOpen.value = false;
+  void nextTick(() => documentViewerRef.value?.focus());
+}
+
+function moveDocumentSearchMatch(delta: -1 | 1) {
+  const count = documentSearchMatches.value.length;
+  if (count === 0) return;
+  documentSearchMatchIndex.value = (documentSearchActiveIndex.value + delta + count) % count;
+  void scrollDocumentSearchMatchIntoView();
+}
+
+async function scrollDocumentSearchMatchIntoView() {
+  await nextTick();
+  documentViewerRef.value?.querySelector<HTMLElement>('[data-document-search-active="true"]')?.scrollIntoView({ block: "center", inline: "nearest" });
+}
+
+watch([documentSearchQuery, editJson], () => {
+  documentSearchMatchIndex.value = 0;
+  void scrollDocumentSearchMatchIntoView();
+});
+
+watch([viewMode, isEditing, selectedIdx], ([mode, editing, index]) => {
+  if (mode === "document" && !editing && index !== null) return;
+  documentViewerSearchActive.value = false;
+  documentSearchOpen.value = false;
+});
+
 onMounted(async () => {
+  window.addEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
   try {
     await connectionStore.ensureConnected(props.connectionId);
   } catch (e) {
@@ -885,6 +955,7 @@ onMounted(async () => {
   void nextTick(resizeDocumentQueryInputs);
 });
 onBeforeUnmount(() => {
+  window.removeEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
   stopDocumentLoadingTimer();
   endTableSearchSplitResize();
@@ -931,6 +1002,8 @@ function resetTableSearchSplitWidth() {
   const containerWidth = tableSearchSplitContainerWidth();
   tableFindPaneWidth.value = containerWidth > 0 ? clampSearchSplitWidth({ containerWidth }) : null;
 }
+
+defineExpose({ focusSearch });
 </script>
 
 <template>
@@ -1142,12 +1215,16 @@ function resetTableSearchSplitWidth() {
                         </PopoverTrigger>
                         <PopoverContent align="start" class="w-72 max-w-[calc(100vw-32px)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-lg" @click.stop @keydown.stop>
                           <div class="border-b bg-muted/40 px-2 py-1.5 text-xs font-medium text-foreground">{{ t("grid.filterBuilderColumn") }}</div>
+                          <div class="relative border-b p-2">
+                            <Search class="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                            <Input v-model="documentFilterFieldSearch[rule.id]" autofocus class="h-7 pl-7 text-xs" :placeholder="t('grid.filterBuilderSearchColumns')" />
+                          </div>
                           <div class="max-h-72 overflow-auto py-1">
-                            <div v-for="field in documentFilterFieldRows" :key="field.path" class="flex items-center gap-1 px-1.5">
+                            <div v-for="field in documentFilterFieldRowsForRule(rule.id)" :key="field.path" class="flex items-center gap-1 px-1.5">
                               <button
                                 type="button"
                                 class="flex h-7 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
-                                :class="{ invisible: field.children.length === 0 }"
+                                :class="{ invisible: field.children.length === 0 || documentFilterFieldSearchActive(rule.id) }"
                                 :style="{ marginLeft: `${field.depth * 14}px` }"
                                 @click.stop="toggleDocumentFilterFieldExpanded(field.path)"
                               >
@@ -1155,11 +1232,11 @@ function resetTableSearchSplitWidth() {
                                 <ChevronDown v-else class="h-3.5 w-3.5" />
                               </button>
                               <button type="button" class="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 text-left text-xs hover:bg-accent" :class="rule.fieldName === field.path ? 'bg-accent text-foreground' : ''" @click="selectDocumentFilterField(rule.id, field.path)">
-                                <span class="min-w-0 flex-1 truncate font-mono" :title="field.displayPath">{{ field.label }}</span>
+                                <span class="min-w-0 flex-1 truncate font-mono" :title="field.displayPath">{{ documentFilterFieldSearchActive(rule.id) ? field.displayPath : field.label }}</span>
                                 <span v-if="field.kind !== 'scalar'" class="shrink-0 rounded border px-1 py-0 text-[10px] leading-4 text-muted-foreground">{{ documentFilterFieldKindLabel(field.kind) }}</span>
                               </button>
                             </div>
-                            <div v-if="documentFilterFieldRows.length === 0" class="px-3 py-6 text-center text-xs text-muted-foreground">
+                            <div v-if="documentFilterFieldRowsForRule(rule.id).length === 0" class="px-3 py-6 text-center text-xs text-muted-foreground">
                               {{ t("grid.noSearchResults") }}
                             </div>
                           </div>
@@ -1318,6 +1395,23 @@ function resetTableSearchSplitWidth() {
               </template>
             </div>
 
+            <div v-if="documentSearchOpen && !isEditing" data-document-search class="flex h-9 shrink-0 items-center justify-end gap-1 border-b bg-background px-2">
+              <div class="relative w-56 max-w-[45%] min-w-32">
+                <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input ref="documentSearchInputRef" v-model="documentSearchQuery" class="h-7 pl-7 pr-2 text-xs" :placeholder="t('editor.search.find')" @keydown.enter.prevent="moveDocumentSearchMatch($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeDocumentSearch" />
+              </div>
+              <span class="w-12 text-center text-[11px] tabular-nums text-muted-foreground">{{ documentSearchStatus }}</span>
+              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('editor.search.prevMatch')" :disabled="documentSearchMatches.length === 0" @click="moveDocumentSearchMatch(-1)">
+                <ChevronUp class="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('editor.search.nextMatch')" :disabled="documentSearchMatches.length === 0" @click="moveDocumentSearchMatch(1)">
+                <ChevronDown class="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="ghost" size="icon" class="h-7 w-7" @click="closeDocumentSearch">
+                <X class="h-3.5 w-3.5" />
+              </Button>
+            </div>
+
             <div v-if="isEditing" class="flex-1 overflow-auto bg-muted/10">
               <div class="json-edit min-w-fit p-5" :style="{ ...documentFontStyle, '--mongo-key-width': editKeyWidth }">
                 <div class="json-edit-brace">{</div>
@@ -1330,7 +1424,7 @@ function resetTableSearchSplitWidth() {
               </div>
             </div>
 
-            <div v-else class="flex-1 overflow-auto bg-muted/10">
+            <div v-else ref="documentViewerRef" data-document-json-viewer tabindex="-1" class="flex-1 overflow-auto bg-muted/10 outline-none">
               <pre class="json-viewer min-w-fit p-5" :style="documentFontStyle" v-html="highlightedJson(editJson)" />
             </div>
           </template>
@@ -1425,5 +1519,27 @@ function resetTableSearchSplitWidth() {
 
 :global(.dark) :deep(.json-null) {
   color: #94a3b8;
+}
+
+:deep(.document-search-match) {
+  border-radius: 2px;
+  background: #fde68a;
+  color: inherit;
+  padding: 0;
+}
+
+:deep(.document-search-match-active) {
+  background: #f59e0b;
+  color: #111827;
+  outline: 1px solid #d97706;
+}
+
+:global(.dark) :deep(.document-search-match) {
+  background: #854d0e;
+}
+
+:global(.dark) :deep(.document-search-match-active) {
+  background: #fbbf24;
+  color: #111827;
 }
 </style>

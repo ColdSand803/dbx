@@ -10,6 +10,7 @@ import {
   elasticsearchSearchBodyFromDocumentQuery,
   flattenDocumentFieldPathTree,
   formatDocumentQueryInput,
+  searchDocumentFieldPathTree,
   type DocumentFilterRule,
 } from "../../apps/desktop/src/lib/app/documentStoreProvider.ts";
 
@@ -77,6 +78,19 @@ test("builds hierarchical document field path tree for array objects", () => {
   assert.deepEqual(
     flattened.map((node) => node.path),
     ["_id", "orders", "orders.sku", "orders.qty", "tags", "profile", "profile.address", "profile.address.zip"],
+  );
+});
+
+test("searches nested document field paths", () => {
+  const tree = documentFieldPathTreeFromDocuments([{ profile: { address: { zip: 200000 }, city: "Shanghai" }, orders: [{ sku: "A" }] }]);
+
+  assert.deepEqual(
+    searchDocumentFieldPathTree(tree, "address").map((node) => node.path),
+    ["profile.address", "profile.address.zip"],
+  );
+  assert.deepEqual(
+    searchDocumentFieldPathTree(tree, "orders[] > sku").map((node) => node.path),
+    ["orders.sku"],
   );
 });
 

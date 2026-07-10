@@ -145,6 +145,14 @@ export function flattenDocumentFieldPathTree(nodes: readonly DocumentFieldPathNo
   return flattened;
 }
 
+export function searchDocumentFieldPathTree(nodes: readonly DocumentFieldPathNode[], query: string): DocumentFieldPathNode[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return flattenDocumentFieldPathTree(nodes);
+  return flattenDocumentFieldPathTree(nodes).filter((node) => {
+    return node.path.toLowerCase().includes(normalizedQuery) || node.displayPath.toLowerCase().includes(normalizedQuery) || node.label.toLowerCase().includes(normalizedQuery);
+  });
+}
+
 function collectDocumentFieldPathNode(nodes: DocumentFieldPathAccumulatorNode[], byKey: Map<string, DocumentFieldPathAccumulatorNode>, path: string, value: unknown, depth = 0): void {
   const key = path.split(".").pop() || path;
   const node = ensureDocumentFieldPathNode(nodes, byKey, key, path, documentFieldPathKindFromValue(value));
