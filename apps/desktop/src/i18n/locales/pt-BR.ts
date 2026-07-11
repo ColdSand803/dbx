@@ -1041,6 +1041,7 @@ export default withEnglishFallback({
   },
   explain: {
     title: "Plano de Execução",
+    standardTable: "Tabela",
     tree: "Árvore",
     summary: "Resumo",
     running: "Lendo plano de execução...",

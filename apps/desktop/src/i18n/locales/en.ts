@@ -1097,6 +1097,7 @@ export default {
   },
   explain: {
     title: "Explain Plan",
+    standardTable: "Table",
     tree: "Tree",
     summary: "Summary",
     running: "Reading explain plan...",

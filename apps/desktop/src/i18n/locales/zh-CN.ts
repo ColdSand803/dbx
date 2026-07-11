@@ -1098,6 +1098,7 @@ export default withEnglishFallback({
   },
   explain: {
     title: "执行计划",
+    standardTable: "标准表格",
     tree: "树",
     summary: "摘要",
     running: "正在读取执行计划...",

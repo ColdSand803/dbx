@@ -1040,6 +1040,7 @@ export default withEnglishFallback({
   },
   explain: {
     title: "実行計画",
+    standardTable: "標準テーブル",
     tree: "ツリー",
     summary: "サマリー",
     running: "実行計画を読み取り中...",

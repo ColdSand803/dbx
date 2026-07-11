@@ -1040,6 +1040,7 @@ export default withEnglishFallback({
   },
   explain: {
     title: "執行計畫",
+    standardTable: "標準表格",
     tree: "樹狀",
     summary: "摘要",
     running: "正在讀取執行計畫……",

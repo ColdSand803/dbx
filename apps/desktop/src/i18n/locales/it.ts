@@ -1039,6 +1039,7 @@ export default withEnglishFallback({
   },
   explain: {
     title: "Piano di Spiegazione",
+    standardTable: "Tabella",
     tree: "Albero",
     summary: "Riepilogo",
     running: "Lettura del piano di spiegazione...",
