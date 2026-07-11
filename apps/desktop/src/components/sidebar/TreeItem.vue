@@ -147,6 +147,7 @@ import { supportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
+import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
 import InstallExtensionDialog from "@/components/objects/InstallExtensionDialog.vue";
@@ -2061,6 +2062,36 @@ function closeDroppedTableObjectTabsForNode(node: TreeNode) {
   });
 }
 
+function tableDataRefreshTargetForNode(node: TreeNode) {
+  if (!node.connectionId || !node.database) return null;
+  const config = connectionStore.getConfig(node.connectionId);
+  const dataTabSchema = connectionObjectTreeNodeSchema(config, node.database, node.schema);
+  return {
+    connectionId: node.connectionId,
+    database: node.database,
+    schema: dataTabSchema,
+    schemaCandidates: [node.schema, dataTabSchema],
+    catalog: node.catalog,
+    name: node.label,
+  };
+}
+
+async function refreshMutatedTableDataTabsForNode(node: TreeNode) {
+  const target = tableDataRefreshTargetForNode(node);
+  if (!target) return;
+  try {
+    await queryStore.refreshDataTabsForTable(target);
+  } catch (error) {
+    console.warn("[DBX][table-data-refresh-after-mutation:error]", { target, error });
+  }
+}
+
+async function refreshMutatedTableDataTabsForNodes(nodes: readonly TreeNode[]) {
+  for (const target of nodes) {
+    await refreshMutatedTableDataTabsForNode(target);
+  }
+}
+
 function selectedBatchDropTargets(): TreeNode[] {
   const selected = selectedTreeNodesInVisibleOrder();
   if (selected.length <= 1 || !selected.some((node) => node.id === props.node.id)) return [];
@@ -2469,13 +2500,17 @@ async function confirmBatchTruncate() {
   if (!targets.length) return;
   try {
     const useCascade = canBatchTruncateCascade.value && batchTruncateCascade.value;
-    for (const target of targets) {
-      if (!target.connectionId || !target.database) continue;
-      await connectionStore.ensureConnected(target.connectionId);
-      const sql = await truncateSqlForTreeNode(target, { cascade: useCascade });
-      if (!sql) continue;
-      await api.executeQuery(target.connectionId, target.database, sql, target.schema);
-    }
+    await runBatchTableTruncate(
+      targets,
+      async (target) => {
+        if (!target.connectionId || !target.database) return false;
+        await connectionStore.ensureConnected(target.connectionId);
+        const sql = await truncateSqlForTreeNode(target, { cascade: useCascade });
+        if (!sql) return false;
+        await api.executeQuery(target.connectionId, target.database, sql, target.schema);
+      },
+      refreshMutatedTableDataTabsForNodes,
+    );
     toast(t("contextMenu.batchTruncateSuccess", { count: targets.length }), 3000);
     showBatchTruncateConfirm.value = false;
   } catch (e: any) {
@@ -2507,6 +2542,7 @@ async function confirmBatchEmpty() {
   } else {
     toast(t("contextMenu.batchEmptyPartialFail", { success: result.succeeded.length, failed: result.failed.length }), 5000);
   }
+  await refreshMutatedTableDataTabsForNodes(result.succeeded);
   batchEmptyTargets.value = [];
   showBatchEmptyConfirm.value = false;
 }
@@ -2706,6 +2742,7 @@ async function confirmEmptyTable() {
     await api.executeQuery(node.connectionId, node.database, sql, node.schema);
     const messageKey = currentDatabaseType() === "clickhouse" ? "contextMenu.emptyTableSubmitted" : "contextMenu.emptyTableSuccess";
     toast(t(messageKey, { name: node.label }), 3000);
+    await refreshMutatedTableDataTabsForNode(node);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -2725,6 +2762,7 @@ async function confirmTruncateTable() {
     const sql = truncateTablePreviewSql.value || (await buildTruncateTableSql(truncateTableSqlOptions()));
     await api.executeQuery(node.connectionId, node.database, sql, node.schema);
     toast(t("contextMenu.truncateTableSuccess", { name: node.label }), 3000);
+    await refreshMutatedTableDataTabsForNode(node);
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   }
