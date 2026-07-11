@@ -764,6 +764,10 @@ pub fn build_import_insert_batch_from_rows(
     Ok((!sql.trim().is_empty()).then_some(ImportSqlBatch { sql, row_count: rows.len() }))
 }
 
+fn supports_multi_row_insert_values(db_type: &DatabaseType) -> bool {
+    !matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Iris)
+}
+
 pub fn build_import_insert_batches(
     data: &ParsedImportFile,
     mappings: &[TableImportColumnMapping],
@@ -784,12 +788,9 @@ pub fn build_import_insert_batches(
                 .map(|(_, data_type)| data_type.clone())
         })
         .collect::<Vec<_>>();
-    let batch_size = match db_type {
-        // Oracle-compatible drivers reject INSERT ... VALUES (...), (...), so
-        // keep import batches executable as single-row statements.
-        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => 1,
-        _ => batch_size.max(1),
-    };
+    // Drivers without multi-row VALUES support still benefit from the agent
+    // batching the generated single-row statements during execution.
+    let batch_size = if supports_multi_row_insert_values(db_type) { batch_size.max(1) } else { 1 };
     let mut batches = Vec::new();
 
     for chunk in data.rows.chunks(batch_size) {
@@ -1903,6 +1904,38 @@ mod tests {
                 row_count: 1,
             },
         ]);
+    }
+
+    #[test]
+    fn iris_import_uses_single_row_values_statements() {
+        let mappings = vec![TableImportColumnMapping {
+            source_column: "id".to_string(),
+            target_column: "id".to_string(),
+            target_data_type: None,
+        }];
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string()],
+            rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+            total_rows: 2,
+        };
+
+        let batches =
+            build_import_insert_batches(&data, &mappings, &[], "items", "SQLUSER", &DatabaseType::Iris, 100).unwrap();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].sql, "INSERT INTO \"SQLUSER\".\"items\" (\"id\") VALUES\n(1)");
+        assert_eq!(batches[0].row_count, 1);
+        assert_eq!(batches[1].sql, "INSERT INTO \"SQLUSER\".\"items\" (\"id\") VALUES\n(2)");
+        assert_eq!(batches[1].row_count, 1);
+    }
+
+    #[test]
+    fn multi_row_insert_values_support_matches_database_dialects() {
+        assert!(!supports_multi_row_insert_values(&DatabaseType::Oracle));
+        assert!(!supports_multi_row_insert_values(&DatabaseType::OceanbaseOracle));
+        assert!(!supports_multi_row_insert_values(&DatabaseType::Iris));
+        assert!(supports_multi_row_insert_values(&DatabaseType::Postgres));
+        assert!(supports_multi_row_insert_values(&DatabaseType::Mysql));
     }
 
     #[test]
