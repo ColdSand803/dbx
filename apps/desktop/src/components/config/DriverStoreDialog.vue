@@ -44,6 +44,7 @@ const driverStoreTab = ref("agent");
 
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { DriverStorePathInfo } from "@/lib/backend/api";
+import { driverRuntimeProtocolLabel } from "./driverRuntimeDisplay";
 const settingsStore = useSettingsStore();
 
 type DriverStoreDirKind = "plugin" | "agent";
@@ -1479,6 +1480,10 @@ watch(driverStoreTab, (tab) => {
                         <span>{{ runtimeKindLabel(runtime) }}</span>
                         <span class="text-muted-foreground/50">/</span>
                         <span>{{ runtimeSourceLabel(runtime) }}</span>
+                        <template v-if="runtime.protocol_mode">
+                          <span class="text-muted-foreground/50">/</span>
+                          <span>{{ driverRuntimeProtocolLabel(runtime) }}</span>
+                        </template>
                       </div>
                     </div>
 

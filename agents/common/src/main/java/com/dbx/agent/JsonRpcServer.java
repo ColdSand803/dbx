@@ -23,6 +23,7 @@ public final class JsonRpcServer {
     private static final long CONNECTION_VALIDATION_INTERVAL_MILLIS = 5_000L;
 
     private final DatabaseAgent agent;
+    private final JdbcExecutor jdbcExecutor;
     private final Gson gson = new GsonBuilder()
         // JDBC DECIMAL/NUMERIC values can exceed JavaScript Number precision after JSON-RPC parsing.
         .registerTypeAdapter(
@@ -39,6 +40,7 @@ public final class JsonRpcServer {
 
     public JsonRpcServer(DatabaseAgent agent) {
         this.agent = agent;
+        this.jdbcExecutor = new JdbcExecutor();
     }
 
     public void run() {
@@ -82,6 +84,14 @@ public final class JsonRpcServer {
             response.add("error", error);
             return gson.toJson(response);
         }
+    }
+
+    Object dispatchForRuntime(String method, JsonObject params) throws Exception {
+        return AgentExecutionContext.withJdbcExecutor(jdbcExecutor, () -> dispatch(method, params));
+    }
+
+    void cancelActiveStatements() {
+        jdbcExecutor.cancelActiveStatements();
     }
 
     private Object dispatch(String method, JsonObject params) throws Exception {
@@ -243,18 +253,17 @@ public final class JsonRpcServer {
             return agent.executeBatch(statements, stringOrNull(params, "schema"));
         }
         if (AgentProtocol.METHOD_DISCONNECT.equals(method)) {
-            JdbcExecutor.INSTANCE.closeAllQuerySessions();
-            JdbcExecutor.INSTANCE.closeAllTableReadSessions();
+            jdbcExecutor.closeAllQuerySessions();
+            jdbcExecutor.closeAllTableReadSessions();
             agent.disconnect();
             lastConnectParams = null;
             return Collections.singletonMap("ok", true);
         }
         if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {
-            JdbcExecutor.INSTANCE.closeAllQuerySessions();
-            JdbcExecutor.INSTANCE.closeAllTableReadSessions();
+            jdbcExecutor.closeAllQuerySessions();
+            jdbcExecutor.closeAllTableReadSessions();
             agent.disconnect();
             lastConnectParams = null;
-            System.exit(0);
             return Collections.singletonMap("ok", true);
         }
         throw new IllegalArgumentException("Unknown method: " + method);
@@ -300,8 +309,8 @@ public final class JsonRpcServer {
             return;
         }
 
-        JdbcExecutor.INSTANCE.closeAllQuerySessions();
-        JdbcExecutor.INSTANCE.closeAllTableReadSessions();
+        jdbcExecutor.closeAllQuerySessions();
+        jdbcExecutor.closeAllTableReadSessions();
         try {
             agent.disconnect();
         } catch (Exception ignored) {

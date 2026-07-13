@@ -134,6 +134,8 @@ export interface DriverRuntimeInfo {
   can_stop: boolean;
   can_restart: boolean;
   control_unavailable_reason: string | null;
+  protocol_mode: "multi_session" | "legacy" | null;
+  active_sessions: number | null;
 }
 
 export interface DriverRuntimeSummary {

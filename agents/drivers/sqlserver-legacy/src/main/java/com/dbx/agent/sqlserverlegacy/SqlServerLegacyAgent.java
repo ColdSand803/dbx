@@ -3,7 +3,7 @@ package com.dbx.agent.sqlserverlegacy;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.JdbcAgentProfile;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 
 import java.security.Security;
 import java.sql.Connection;
@@ -259,6 +259,6 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) throws Exception {
-        new JsonRpcServer(new SqlServerLegacyAgent()).run();
+        new MultiSessionJsonRpcServer(SqlServerLegacyAgent::new).run();
     }
 }

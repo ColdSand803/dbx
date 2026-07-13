@@ -1264,71 +1264,161 @@ impl AppState {
             agent_connection_pool_database_type!() => {
                 let connect_params =
                     agent_connect_params(&db_config, &host, port, db_config.effective_database().unwrap_or(""));
-                // Kerberos JVM properties are connection-scoped; shared agent daemons must not inherit them.
-                let mut client = self
-                    .agent_manager
-                    .spawn_with_extra_java_args(
-                        &db_config.db_type,
-                        db_config.driver_profile.as_deref(),
-                        &db_config.agent_java_options,
-                    )
-                    .await?;
-                let connect_result = client
-                    .call_method_with_timeout::<serde_json::Value>(
-                        AgentMethod::Connect,
-                        connect_params,
-                        Some(agent_connect_timeout(&db_config)),
-                    )
-                    .await;
-                if let Err(err) = connect_result {
-                    let alternate_configs = oracle_alternate_connect_configs(&db_config, &err);
-                    if !alternate_configs.is_empty() {
-                        log::warn!(
+                if db_config.db_type != DatabaseType::Etcd && db_config.db_type != DatabaseType::ZooKeeper {
+                    let agent_session_id = uuid::Uuid::new_v4().simple().to_string();
+                    let initial_result = self
+                        .agent_manager
+                        .spawn_shared_connection_client(
+                            &db_config.db_type,
+                            db_config.driver_profile.as_deref(),
+                            &db_config.agent_java_options,
+                            agent_session_id.clone(),
+                            connect_params,
+                            agent_connect_timeout(&db_config),
+                        )
+                        .await;
+                    let client = match initial_result {
+                        Ok(client) => client,
+                        Err(err) => {
+                            let alternate_configs = oracle_alternate_connect_configs(&db_config, &err);
+                            if alternate_configs.is_empty() {
+                                if err.contains("does not support multi_session protocol v2") {
+                                    let mut client = self
+                                        .agent_manager
+                                        .spawn_with_extra_java_args(
+                                            &db_config.db_type,
+                                            db_config.driver_profile.as_deref(),
+                                            &db_config.agent_java_options,
+                                        )
+                                        .await?;
+                                    client
+                                        .call_method_with_timeout::<serde_json::Value>(
+                                            AgentMethod::Connect,
+                                            agent_connect_params(
+                                                &db_config,
+                                                &host,
+                                                port,
+                                                db_config.effective_database().unwrap_or(""),
+                                            ),
+                                            Some(agent_connect_timeout(&db_config)),
+                                        )
+                                        .await?;
+                                    client
+                                } else {
+                                    return Err(oracle_error_with_driver_hint(&db_config, &err));
+                                }
+                            } else {
+                                let mut fallback_errors = Vec::new();
+                                let mut connected = None;
+                                for alternate_config in alternate_configs {
+                                    let label =
+                                        oracle_alternate_connect_config_labels(std::slice::from_ref(&alternate_config))
+                                            .into_iter()
+                                            .next()
+                                            .unwrap_or_else(|| "alternate".to_string());
+                                    let alternate_params = agent_connect_params(
+                                        &alternate_config,
+                                        &host,
+                                        port,
+                                        alternate_config.effective_database().unwrap_or(""),
+                                    );
+                                    match self
+                                        .agent_manager
+                                        .spawn_shared_connection_client(
+                                            &alternate_config.db_type,
+                                            alternate_config.driver_profile.as_deref(),
+                                            &alternate_config.agent_java_options,
+                                            agent_session_id.clone(),
+                                            alternate_params,
+                                            agent_connect_timeout(&alternate_config),
+                                        )
+                                        .await
+                                    {
+                                        Ok(client) => {
+                                            connected = Some(client);
+                                            break;
+                                        }
+                                        Err(alternate_err) => fallback_errors.push(format!("{label}: {alternate_err}")),
+                                    }
+                                }
+                                connected.ok_or_else(|| {
+                                    format!(
+                                        "{err}\n\nFallback with alternate Oracle connection descriptors failed: {}",
+                                        fallback_errors.join("\n")
+                                    )
+                                })?
+                            }
+                        }
+                    };
+                    PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client)))
+                } else {
+                    // Kerberos JVM properties are connection-scoped; shared agent daemons must not inherit them.
+                    let mut client = self
+                        .agent_manager
+                        .spawn_with_extra_java_args(
+                            &db_config.db_type,
+                            db_config.driver_profile.as_deref(),
+                            &db_config.agent_java_options,
+                        )
+                        .await?;
+                    let connect_result = client
+                        .call_method_with_timeout::<serde_json::Value>(
+                            AgentMethod::Connect,
+                            connect_params,
+                            Some(agent_connect_timeout(&db_config)),
+                        )
+                        .await;
+                    if let Err(err) = connect_result {
+                        let alternate_configs = oracle_alternate_connect_configs(&db_config, &err);
+                        if !alternate_configs.is_empty() {
+                            log::warn!(
                             "Oracle connect failed with {:?} descriptor: {}. Retrying with Oracle JDBC URL variants: {:?}.",
                             db_config.oracle_connection_type,
                             err,
                             oracle_alternate_connect_config_labels(&alternate_configs)
                         );
-                        let mut fallback_errors = Vec::new();
-                        let mut connected = false;
-                        for alternate_config in alternate_configs {
-                            let label = oracle_alternate_connect_config_labels(std::slice::from_ref(&alternate_config))
-                                .into_iter()
-                                .next()
-                                .unwrap_or_else(|| "alternate".to_string());
-                            match client
-                                .call_method_with_timeout::<serde_json::Value>(
-                                    AgentMethod::Connect,
-                                    agent_connect_params(
-                                        &alternate_config,
-                                        &host,
-                                        port,
-                                        alternate_config.effective_database().unwrap_or(""),
-                                    ),
-                                    Some(agent_connect_timeout(&alternate_config)),
-                                )
-                                .await
-                            {
-                                Ok(_) => {
-                                    connected = true;
-                                    break;
-                                }
-                                Err(alternate_err) => {
-                                    fallback_errors.push(format!("{label}: {alternate_err}"));
+                            let mut fallback_errors = Vec::new();
+                            let mut connected = false;
+                            for alternate_config in alternate_configs {
+                                let label =
+                                    oracle_alternate_connect_config_labels(std::slice::from_ref(&alternate_config))
+                                        .into_iter()
+                                        .next()
+                                        .unwrap_or_else(|| "alternate".to_string());
+                                match client
+                                    .call_method_with_timeout::<serde_json::Value>(
+                                        AgentMethod::Connect,
+                                        agent_connect_params(
+                                            &alternate_config,
+                                            &host,
+                                            port,
+                                            alternate_config.effective_database().unwrap_or(""),
+                                        ),
+                                        Some(agent_connect_timeout(&alternate_config)),
+                                    )
+                                    .await
+                                {
+                                    Ok(_) => {
+                                        connected = true;
+                                        break;
+                                    }
+                                    Err(alternate_err) => {
+                                        fallback_errors.push(format!("{label}: {alternate_err}"));
+                                    }
                                 }
                             }
+                            if !connected {
+                                return Err(format!(
+                                    "{err}\n\nFallback with alternate Oracle JDBC URLs failed: {}",
+                                    fallback_errors.join("\n")
+                                ));
+                            }
+                        } else {
+                            return Err(oracle_error_with_driver_hint(&db_config, &err));
                         }
-                        if !connected {
-                            return Err(format!(
-                                "{err}\n\nFallback with alternate Oracle JDBC URLs failed: {}",
-                                fallback_errors.join("\n")
-                            ));
-                        }
-                    } else {
-                        return Err(oracle_error_with_driver_hint(&db_config, &err));
                     }
+                    PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client)))
                 }
-                PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client)))
             }
             DatabaseType::PrestoSql => {
                 let jdbc_config = prestosql_jdbc_config_for_endpoint(&db_config, &host, port);
@@ -4004,6 +4094,17 @@ mod tests {
     }
 
     #[test]
+    fn oracle_uses_isolated_pool_keys_for_tab_sessions() {
+        let mut config = mysql_config(Some("ORCLPDB1"));
+        config.db_type = DatabaseType::Oracle;
+
+        assert_eq!(
+            super::session_scoped_pool_key_for(Some(&config), "oracle-conn".to_string(), Some("table-tab-1")),
+            "oracle-conn:session:table-tab-1"
+        );
+    }
+
+    #[test]
     fn other_agent_single_connection_types_keep_database_scoped_pool_keys() {
         assert_eq!(
             super::base_pool_key_for(Some(DatabaseType::Kingbase), "kingbase-conn", Some("app1"), false),
@@ -4334,6 +4435,25 @@ mod tests {
         assert!(state.close_client_session_pool("conn", None, "tab-1").await.unwrap());
         assert!(!state.connections.read().await.contains_key(pool_key));
         assert!(!state.pool_activity.read().await.contains_key(pool_key));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn closing_oracle_table_tab_keeps_connection_scoped_pool() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("ORCLPDB1"));
+        config.id = "oracle-conn".to_string();
+        config.db_type = DatabaseType::Oracle;
+        state.configs.write().await.insert(config.id.clone(), config);
+
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        state.connections.write().await.insert("oracle-conn".to_string(), PoolKind::Sqlite(pool));
+        state.pool_activity.write().await.insert("oracle-conn".to_string(), super::PoolActivity::now());
+
+        assert!(!state.close_client_session_pool("oracle-conn", Some("APP"), "table-tab-1").await.unwrap());
+        assert!(state.connections.read().await.contains_key("oracle-conn"));
+        assert!(state.pool_activity.read().await.contains_key("oracle-conn"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

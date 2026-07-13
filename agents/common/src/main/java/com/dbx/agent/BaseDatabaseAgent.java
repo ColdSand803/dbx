@@ -47,46 +47,46 @@ public abstract class BaseDatabaseAgent implements DatabaseAgent {
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
         Connection conn = requireConnected();
-        return JdbcExecutor.INSTANCE.executePage(
+        return JdbcExecutor.current().executePage(
             conn,
             sql,
             schema,
             this::setSchemaSQL,
             options,
-            JdbcExecutor.INSTANCE::defaultResultValue
+            JdbcExecutor.current()::defaultResultValue
         );
     }
 
     @Override
     public QueryPageResult fetchQueryPage(String sessionId, int pageSize) {
-        return JdbcExecutor.INSTANCE.fetchPage(sessionId, pageSize);
+        return JdbcExecutor.current().fetchPage(sessionId, pageSize);
     }
 
     @Override
     public boolean closeQuerySession(String sessionId) {
-        return JdbcExecutor.INSTANCE.closeQuerySession(sessionId);
+        return JdbcExecutor.current().closeQuerySession(sessionId);
     }
 
     @Override
     public QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
-        return JdbcExecutor.INSTANCE.startTableRead(
+        return JdbcExecutor.current().startTableRead(
             requireConnected(),
             sql,
             schema,
             this::setSchemaSQL,
             options,
-            JdbcExecutor.INSTANCE::defaultResultValue
+            JdbcExecutor.current()::defaultResultValue
         );
     }
 
     @Override
     public QueryPageResult fetchTableReadPage(String sessionId, int pageSize) {
-        return JdbcExecutor.INSTANCE.fetchTableReadPage(sessionId, pageSize);
+        return JdbcExecutor.current().fetchTableReadPage(sessionId, pageSize);
     }
 
     @Override
     public boolean closeTableReadSession(String sessionId) {
-        return JdbcExecutor.INSTANCE.closeTableReadSession(sessionId);
+        return JdbcExecutor.current().closeTableReadSession(sessionId);
     }
 
     @Override

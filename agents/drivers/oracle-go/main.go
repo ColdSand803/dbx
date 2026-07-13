@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/sijms/go-ora/v2"
@@ -25,8 +26,11 @@ import (
 )
 
 const protocolVersion = 1
+const multiSessionProtocolVersion = 2
 const defaultMaxRows = 1000
 const oracleCharsetZHS32GB18030 = 854
+const legacyAgentSessionID = "__legacy__"
+const maxAgentSessions = 256
 
 var (
 	oraclePlSQLBlockStartRegexp          = regexp.MustCompile(`(?is)^\s*(?:DECLARE|BEGIN|CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:EDITIONABLE|NONEDITIONABLE)\s+)?(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?))\b`)
@@ -317,11 +321,28 @@ type server struct {
 	tableReadSessions      map[string]*querySession
 	nextSessionID          int64
 	nextTableReadSessionID int64
+	activeCancelMu         sync.Mutex
+	activeCancel           context.CancelFunc
+	activeRows             map[*sql.Rows]context.CancelFunc
+}
+
+type agentSession struct {
+	server *server
+	mu     sync.Mutex
+}
+
+type runtimeServer struct {
+	mu       sync.RWMutex
+	sessions map[string]*agentSession
 }
 
 func main() {
-	s := newServer()
+	runtime := newRuntimeServer()
 	encoder := json.NewEncoder(os.Stdout)
+	var encoderMu sync.Mutex
+	var requests sync.WaitGroup
+	shutdown := make(chan struct{})
+	var shutdownOnce sync.Once
 	fmt.Fprintln(os.Stdout, `{"ready":true}`)
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -331,22 +352,230 @@ func main() {
 		if line == "" {
 			continue
 		}
-		resp, shutdown := s.handleLine(line)
-		if err := encoder.Encode(resp); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to write response: %v\n", err)
+		var requestEnvelope request
+		if json.Unmarshal([]byte(line), &requestEnvelope) == nil && requestEnvelope.Method == "shutdown" {
+			requests.Wait()
+			resp, _ := runtime.handleLine(line)
+			encoderMu.Lock()
+			err := encoder.Encode(resp)
+			encoderMu.Unlock()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to write response: %v\n", err)
+			}
 			return
 		}
-		if shutdown {
+		requests.Add(1)
+		go func() {
+			defer requests.Done()
+			resp, shouldShutdown := runtime.handleLine(line)
+			encoderMu.Lock()
+			err := encoder.Encode(resp)
+			encoderMu.Unlock()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to write response: %v\n", err)
+				shutdownOnce.Do(func() { close(shutdown) })
+				return
+			}
+			if shouldShutdown {
+				shutdownOnce.Do(func() { close(shutdown) })
+			}
+		}()
+		select {
+		case <-shutdown:
+			requests.Wait()
 			return
+		default:
 		}
 	}
+	requests.Wait()
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
 		fmt.Fprintf(os.Stderr, "failed to read stdin: %v\n", err)
 	}
 }
 
+func newRuntimeServer() *runtimeServer {
+	return &runtimeServer{sessions: map[string]*agentSession{}}
+}
+
+func (r *runtimeServer) handleLine(line string) (response, bool) {
+	var req request
+	if err := json.Unmarshal([]byte(line), &req); err != nil {
+		return errorResponse(nil, err), false
+	}
+	if len(req.ID) == 0 {
+		req.ID = json.RawMessage("1")
+	}
+	result, shutdown, err := r.dispatch(req.Method, req.Params)
+	if err != nil {
+		return errorResponse(req.ID, err), false
+	}
+	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shutdown
+}
+
+func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessage) (any, bool, error) {
+	switch method {
+	case "handshake":
+		return map[string]any{
+			"protocolVersion":      multiSessionProtocolVersion,
+			"agentProtocolVersion": multiSessionProtocolVersion,
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "ddl", "multi_session"},
+		}, false, nil
+	case "open_session":
+		agentSessionID := stringParam(params, "agentSessionId")
+		if agentSessionID == "" {
+			return nil, false, errors.New("agentSessionId is required")
+		}
+		var connectParams connectParams
+		if err := decodeParams(params, &connectParams); err != nil {
+			return nil, false, err
+		}
+		return map[string]bool{"ok": true}, false, r.openSession(agentSessionID, connectParams)
+	case "close_session":
+		return map[string]bool{"ok": true}, false, r.closeSession(stringParam(params, "agentSessionId"))
+	case "validate_session":
+		agentSessionID := stringParam(params, "agentSessionId")
+		session, err := r.session(agentSessionID)
+		if err != nil {
+			return nil, false, err
+		}
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		if _, _, err := session.server.dispatch("validate_connection", params); err == nil {
+			return map[string]bool{"ok": true}, false, nil
+		}
+		// Reconnect only this logical session. Other sessions in the runtime keep
+		// their connections, transactions, cursors, and in-flight requests.
+		if err := session.server.connect(session.server.params); err != nil {
+			return nil, false, err
+		}
+		return map[string]bool{"ok": true}, false, nil
+	case "cancel_session":
+		session, err := r.session(stringParam(params, "agentSessionId"))
+		if err != nil {
+			return nil, false, err
+		}
+		session.server.cancelActiveQuery()
+		return map[string]bool{"ok": true}, false, nil
+	case "test_connection":
+		return newServer().dispatch(method, params)
+	case "shutdown":
+		return map[string]bool{"ok": true}, true, r.closeAllSessions()
+	case "connect":
+		var connectParams connectParams
+		if err := decodeParams(params, &connectParams); err != nil {
+			return nil, false, err
+		}
+		return map[string]bool{"ok": true}, false, r.replaceSession(legacyAgentSessionID, connectParams)
+	case "disconnect":
+		return map[string]bool{"ok": true}, false, r.closeSession(legacyAgentSessionID)
+	default:
+		agentSessionID := stringParam(params, "agentSessionId")
+		if agentSessionID == "" {
+			agentSessionID = legacyAgentSessionID
+		}
+		return r.withSession(agentSessionID, method, params)
+	}
+}
+
+func (r *runtimeServer) withSession(agentSessionID, method string, params map[string]json.RawMessage) (any, bool, error) {
+	session, err := r.session(agentSessionID)
+	if err != nil {
+		return nil, false, err
+	}
+	// Oracle connection state, transactions, and cursors are session-scoped;
+	// serialize one session while allowing separate sessions to run in parallel.
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.server.dispatch(method, params)
+}
+
+func (r *runtimeServer) openSession(agentSessionID string, params connectParams) error {
+	r.mu.Lock()
+	if _, exists := r.sessions[agentSessionID]; exists {
+		r.mu.Unlock()
+		return fmt.Errorf("agent session already exists: %s", agentSessionID)
+	}
+	if len(r.sessions) >= maxAgentSessions {
+		r.mu.Unlock()
+		return fmt.Errorf("agent session limit reached: %d", maxAgentSessions)
+	}
+	session := &agentSession{server: newServer()}
+	r.sessions[agentSessionID] = session
+	r.mu.Unlock()
+
+	// Reserve the id under the registry lock, then connect outside it so unrelated
+	// sessions can establish database connections concurrently.
+	session.mu.Lock()
+	err := session.server.connect(params)
+	session.mu.Unlock()
+	if err != nil {
+		r.mu.Lock()
+		if r.sessions[agentSessionID] == session {
+			delete(r.sessions, agentSessionID)
+		}
+		r.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (r *runtimeServer) replaceSession(agentSessionID string, params connectParams) error {
+	_ = r.closeSession(agentSessionID)
+	return r.openSession(agentSessionID, params)
+}
+
+func (r *runtimeServer) session(agentSessionID string) (*agentSession, error) {
+	if agentSessionID == "" {
+		return nil, errors.New("agentSessionId is required")
+	}
+	r.mu.RLock()
+	session := r.sessions[agentSessionID]
+	r.mu.RUnlock()
+	if session == nil {
+		return nil, fmt.Errorf("agent session not found: %s", agentSessionID)
+	}
+	return session, nil
+}
+
+func (r *runtimeServer) closeSession(agentSessionID string) error {
+	if agentSessionID == "" {
+		return errors.New("agentSessionId is required")
+	}
+	r.mu.Lock()
+	session := r.sessions[agentSessionID]
+	delete(r.sessions, agentSessionID)
+	r.mu.Unlock()
+	if session == nil {
+		return nil
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.server.disconnect()
+}
+
+func (r *runtimeServer) closeAllSessions() error {
+	r.mu.Lock()
+	sessions := r.sessions
+	r.sessions = map[string]*agentSession{}
+	r.mu.Unlock()
+	var firstErr error
+	for _, session := range sessions {
+		session.mu.Lock()
+		err := session.server.disconnect()
+		session.mu.Unlock()
+		if firstErr == nil && err != nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 func newServer() *server {
-	return &server{sessions: map[string]*querySession{}, tableReadSessions: map[string]*querySession{}}
+	return &server{
+		sessions:          map[string]*querySession{},
+		tableReadSessions: map[string]*querySession{},
+		activeRows:        map[*sql.Rows]context.CancelFunc{},
+	}
 }
 
 func (s *server) handleLine(line string) (response, bool) {
@@ -389,6 +618,11 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		}
 		defer db.Close()
 		return map[string]bool{"ok": true}, false, nil
+	case "validate_connection":
+		if s.db == nil {
+			return nil, false, errors.New("not connected")
+		}
+		return map[string]bool{"ok": true}, false, pingDB(s.db, 5*time.Second)
 	case "list_databases":
 		result, err := s.listDatabases()
 		return result, false, err
@@ -750,7 +984,7 @@ func (s *server) listDatabases() ([]databaseInfo, error) {
 		}
 		return nil, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 	var result []databaseInfo
 	for rows.Next() {
 		var name string
@@ -810,7 +1044,7 @@ func (s *server) listDatabasesFiltered(visibleSchemas []string) ([]databaseInfo,
 		}
 		return nil, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 	var result []databaseInfo
 	for rows.Next() {
 		var name string
@@ -1054,7 +1288,7 @@ func (s *server) listTables(schema string, constraints metadataListConstraints) 
 		}
 		return nil, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 	var result []tableInfo
 	for rows.Next() {
 		var item tableInfo
@@ -1082,7 +1316,7 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		}
 		return nil, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 	var result []objectInfo
 	for rows.Next() {
 		var item objectInfo
@@ -1124,7 +1358,7 @@ ORDER BY c.COLUMN_ID`, []any{schema, table})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 	var result []columnInfo
 	for rows.Next() {
 		var item columnInfo
@@ -1165,7 +1399,7 @@ ORDER BY COLUMN_ID`, []any{schema, table})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 	var result []oracleColumnMeta
 	for rows.Next() {
 		var item oracleColumnMeta
@@ -1201,7 +1435,7 @@ ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION`, []any{schema, table})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 
 	byName := map[string]*indexInfo{}
 	order := []string{}
@@ -1259,7 +1493,7 @@ ORDER BY ac.CONSTRAINT_NAME, acc.POSITION`, []any{schema, table})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 	var result []foreignKeyInfo
 	for rows.Next() {
 		var item foreignKeyInfo
@@ -1285,7 +1519,7 @@ ORDER BY TRIGGER_NAME`, []any{schema, table})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 	var result []triggerInfo
 	for rows.Next() {
 		var item triggerInfo
@@ -1329,7 +1563,7 @@ ORDER BY LINE`, []any{schema, strings.ToUpper(name), upperType})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 	var builder strings.Builder
 	for rows.Next() {
 		var line string
@@ -1748,7 +1982,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 	}
 	columns, err := rows.Columns()
 	if err != nil {
-		rows.Close()
+		s.closeRows(rows)
 		return queryPageResult{}, err
 	}
 	columnTypes := columnTypeNames(rows)
@@ -1760,14 +1994,14 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 	result, err := readQuerySessionPage(session, pageSize)
 	result.ExecutionTimeMS = time.Since(start).Milliseconds()
 	if err != nil {
-		rows.Close()
+		s.closeRows(rows)
 		return queryPageResult{}, err
 	}
 	if result.HasMore {
 		sessionID := s.storeQuerySession(session)
 		result.SessionID = &sessionID
 	} else {
-		rows.Close()
+		s.closeRows(rows)
 	}
 	return result, nil
 }
@@ -1814,7 +2048,7 @@ func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResul
 	}
 	columns, err := rows.Columns()
 	if err != nil {
-		rows.Close()
+		s.closeRows(rows)
 		return queryPageResult{}, err
 	}
 	columnTypes := columnTypeNames(rows)
@@ -1826,14 +2060,14 @@ func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResul
 	result, err := readQuerySessionPage(session, pageSize)
 	result.ExecutionTimeMS = time.Since(start).Milliseconds()
 	if err != nil {
-		rows.Close()
+		s.closeRows(rows)
 		return queryPageResult{}, err
 	}
 	if result.HasMore {
 		sessionID := s.storeTableReadSession(session)
 		result.SessionID = &sessionID
 	} else {
-		rows.Close()
+		s.closeRows(rows)
 	}
 	return result, nil
 }
@@ -1868,7 +2102,7 @@ func (s *server) closeQuerySession(sessionID string) bool {
 	if session == nil {
 		return false
 	}
-	session.rows.Close()
+	s.closeRows(session.rows)
 	delete(s.sessions, sessionID)
 	return true
 }
@@ -1878,7 +2112,7 @@ func (s *server) closeTableReadSession(sessionID string) bool {
 	if session == nil {
 		return false
 	}
-	session.rows.Close()
+	s.closeRows(session.rows)
 	delete(s.tableReadSessions, sessionID)
 	return true
 }
@@ -1964,7 +2198,7 @@ func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error)
 	if err != nil {
 		return queryResult{}, err
 	}
-	defer rows.Close()
+	defer s.closeRows(rows)
 	columns, err := rows.Columns()
 	if err != nil {
 		return queryResult{}, err
@@ -2029,7 +2263,7 @@ func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string) (*sql.Rows,
 	}
 	rewritten, err := s.rewriteXMLTypeSelectSQL(sqlText)
 	if err != nil {
-		rows.Close()
+		s.closeRows(rows)
 		return nil, err
 	}
 	if rewritten == sqlText {
@@ -2037,7 +2271,7 @@ func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string) (*sql.Rows,
 	}
 	// Only pay the ALL_TAB_COLUMNS rewrite cost when the result metadata shows
 	// XMLTYPE. Ordinary Oracle queries should not run dictionary probes first.
-	rows.Close()
+	s.closeRows(rows)
 	return s.queryRows(rewritten, nil)
 }
 
@@ -2671,10 +2905,51 @@ func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(args) == 0 {
-		return db.Query(sqlText)
+	ctx, cancel := context.WithCancel(context.Background())
+	s.activeCancelMu.Lock()
+	s.activeCancel = cancel
+	s.activeCancelMu.Unlock()
+	rows, queryErr := db.QueryContext(ctx, sqlText, args...)
+	s.activeCancelMu.Lock()
+	s.activeCancel = nil
+	if queryErr != nil {
+		cancel()
+	} else {
+		// Keep the context alive for paged reads; database/sql may continue
+		// fetching from the driver until Rows is closed or exhausted.
+		s.activeRows[rows] = cancel
 	}
-	return db.Query(sqlText, args...)
+	s.activeCancelMu.Unlock()
+	return rows, queryErr
+}
+
+func (s *server) cancelActiveQuery() {
+	s.activeCancelMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(s.activeRows)+1)
+	if s.activeCancel != nil {
+		cancels = append(cancels, s.activeCancel)
+	}
+	for _, cancel := range s.activeRows {
+		cancels = append(cancels, cancel)
+	}
+	s.activeCancelMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (s *server) closeRows(rows *sql.Rows) error {
+	if rows == nil {
+		return nil
+	}
+	s.activeCancelMu.Lock()
+	cancel := s.activeRows[rows]
+	delete(s.activeRows, rows)
+	s.activeCancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return rows.Close()
 }
 
 func decodeParams(params map[string]json.RawMessage, target any) error {

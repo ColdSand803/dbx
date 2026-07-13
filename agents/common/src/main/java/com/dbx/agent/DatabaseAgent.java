@@ -102,22 +102,22 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return JdbcExecutor.INSTANCE.executePage(
+        return AgentExecutionContext.jdbcExecutor().executePage(
             conn,
             sql,
             schema,
             this::setSchemaSQL,
             options,
-            JdbcExecutor.INSTANCE::defaultResultValue
+            AgentExecutionContext.jdbcExecutor()::defaultResultValue
         );
     }
 
     default QueryPageResult fetchQueryPage(String sessionId, int pageSize) {
-        return JdbcExecutor.INSTANCE.fetchPage(sessionId, pageSize);
+        return AgentExecutionContext.jdbcExecutor().fetchPage(sessionId, pageSize);
     }
 
     default boolean closeQuerySession(String sessionId) {
-        return JdbcExecutor.INSTANCE.closeQuerySession(sessionId);
+        return AgentExecutionContext.jdbcExecutor().closeQuerySession(sessionId);
     }
 
     default QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
@@ -125,22 +125,22 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return JdbcExecutor.INSTANCE.startTableRead(
+        return AgentExecutionContext.jdbcExecutor().startTableRead(
             conn,
             sql,
             schema,
             this::setSchemaSQL,
             options,
-            JdbcExecutor.INSTANCE::defaultResultValue
+            AgentExecutionContext.jdbcExecutor()::defaultResultValue
         );
     }
 
     default QueryPageResult fetchTableReadPage(String sessionId, int pageSize) {
-        return JdbcExecutor.INSTANCE.fetchTableReadPage(sessionId, pageSize);
+        return AgentExecutionContext.jdbcExecutor().fetchTableReadPage(sessionId, pageSize);
     }
 
     default boolean closeTableReadSession(String sessionId) {
-        return JdbcExecutor.INSTANCE.closeTableReadSession(sessionId);
+        return AgentExecutionContext.jdbcExecutor().closeTableReadSession(sessionId);
     }
 
     /**

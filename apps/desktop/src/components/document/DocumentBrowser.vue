@@ -564,6 +564,7 @@ const customSaveHandler = computed<CustomSaveHandler>(() => ({
   preview: previewDocumentChanges,
   supportsInsert: true,
   readonlyColumns: documentStoreProvider.value.kind === "elasticsearch" ? ["_routing"] : undefined,
+  targetLabel: props.collection,
 }));
 
 function stopDocumentLoadingTimer() {
@@ -1126,6 +1127,7 @@ defineExpose({ focusSearch });
       class="flex-1 min-h-0"
       :result="gridResult"
       context="results"
+      :database-type="props.databaseType"
       editable
       :custom-save-handler="customSaveHandler"
       :loading="loading"

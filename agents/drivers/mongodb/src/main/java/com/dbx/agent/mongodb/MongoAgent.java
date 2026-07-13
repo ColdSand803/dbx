@@ -42,6 +42,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -59,7 +62,10 @@ public final class MongoAgent {
     private static final JsonWriterSettings EXTENDED_JSON_SETTINGS = JsonWriterSettings.builder()
         .outputMode(JsonMode.RELAXED)
         .build();
-    private static MongoClient client;
+    private static final String LEGACY_SESSION_ID = "__legacy__";
+    private static final int MAX_SESSIONS = 256;
+    private static final ThreadLocal<MongoClient> CURRENT_CLIENT = new ThreadLocal<>();
+    private static MongoClient legacyClient;
 
     private MongoAgent() {
     }
@@ -110,7 +116,7 @@ public final class MongoAgent {
         return builder;
     }
 
-    private static Object connect(JsonObject params) {
+    private static MongoClient openClient(JsonObject params) {
         JsonObject connObj = params.has("connection") && params.get("connection").isJsonObject()
             ? params.getAsJsonObject("connection")
             : params;
@@ -118,11 +124,19 @@ public final class MongoAgent {
 
         MongoClientSettings.Builder builder = configureBuilder(connObj);
 
-        if (client != null) {
+        MongoClient client = MongoClients.create(builder.build());
+        try {
+            client.getDatabase(database).runCommand(new Document("ping", 1));
+        } catch (RuntimeException error) {
             client.close();
+            throw error;
         }
-        client = MongoClients.create(builder.build());
-        client.getDatabase(database).runCommand(new Document("ping", 1));
+        return client;
+    }
+
+    private static Object connect(JsonObject params) {
+        closeLegacyClient();
+        legacyClient = openClient(params);
         return Collections.singletonMap("ok", true);
     }
 
@@ -880,10 +894,7 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENT -> deleteDocument(params);
             case AgentProtocol.MONGO_METHOD_DELETE_DOCUMENTS -> deleteDocuments(params);
             case AgentProtocol.METHOD_DISCONNECT, AgentProtocol.METHOD_SHUTDOWN -> {
-                if (client != null) {
-                    client.close();
-                    client = null;
-                }
+                closeLegacyClient();
                 if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {
                     System.exit(0);
                 }
@@ -894,10 +905,21 @@ public final class MongoAgent {
     }
 
     private static MongoClient requireClient() {
+        MongoClient client = CURRENT_CLIENT.get();
+        if (client == null) {
+            client = legacyClient;
+        }
         if (client == null) {
             throw new IllegalStateException("Not connected");
         }
         return client;
+    }
+
+    private static void closeLegacyClient() {
+        if (legacyClient != null) {
+            legacyClient.close();
+            legacyClient = null;
+        }
     }
 
     private static String coalesce(String value) {
@@ -936,16 +958,149 @@ public final class MongoAgent {
     public static void main(String[] args) throws Exception {
         System.out.println("{\"ready\":true}");
         System.out.flush();
+        new RuntimeServer().run();
+    }
 
-        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-        while (true) {
-            String line = reader.readLine();
-            if (line == null) {
-                break;
+    private static final class RuntimeServer {
+        private final Map<String, Session> sessions = new ConcurrentHashMap<>();
+        private final ExecutorService requests = Executors.newCachedThreadPool();
+        private final Object outputLock = new Object();
+
+        private void run() throws Exception {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String request = line;
+                requests.submit(() -> writeResponse(handleRuntimeRequest(request)));
             }
+            closeAllSessions();
+            requests.shutdownNow();
+        }
 
-            System.out.println(handleRequest(line));
-            System.out.flush();
+        private String handleRuntimeRequest(String line) {
+            JsonObject req = JsonParser.parseString(line).getAsJsonObject();
+            JsonElement id = req.get("id");
+            String method = req.get("method").getAsString();
+            JsonObject params = req.has("params") && req.get("params").isJsonObject()
+                ? req.getAsJsonObject("params")
+                : new JsonObject();
+            JsonObject response = new JsonObject();
+            response.addProperty("jsonrpc", "2.0");
+            response.add("id", id);
+            try {
+                Object result;
+                if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
+                    result = AgentProtocol.multiSessionHandshakeResult();
+                } else if (AgentProtocol.METHOD_OPEN_SESSION.equals(method)) {
+                    result = openSession(requiredSessionId(params), params);
+                } else if (AgentProtocol.METHOD_CLOSE_SESSION.equals(method)) {
+                    result = closeSession(requiredSessionId(params));
+                } else if (AgentProtocol.METHOD_VALIDATE_SESSION.equals(method)) {
+                    result = session(requiredSessionId(params)).validate(params);
+                } else if (AgentProtocol.METHOD_CANCEL_SESSION.equals(method)) {
+                    // The legacy synchronous MongoDB driver has no safe per-operation cancel API.
+                    result = Collections.singletonMap("ok", true);
+                } else if (AgentProtocol.METHOD_CONNECT.equals(method)) {
+                    closeSession(LEGACY_SESSION_ID);
+                    result = openSession(LEGACY_SESSION_ID, params);
+                } else if (AgentProtocol.METHOD_DISCONNECT.equals(method)) {
+                    result = closeSession(LEGACY_SESSION_ID);
+                } else if (AgentProtocol.METHOD_SHUTDOWN.equals(method)) {
+                    closeAllSessions();
+                    result = Collections.singletonMap("ok", true);
+                } else {
+                    String sessionId = params.has("agentSessionId")
+                        ? params.get("agentSessionId").getAsString()
+                        : LEGACY_SESSION_ID;
+                    result = session(sessionId).handle(method, params);
+                }
+                response.add("result", GSON.toJsonTree(result));
+            } catch (Exception error) {
+                JsonObject rpcError = new JsonObject();
+                rpcError.addProperty("code", -1);
+                rpcError.addProperty("message", error.getMessage() == null ? "Unknown error" : error.getMessage());
+                response.add("error", rpcError);
+            }
+            return GSON.toJson(response);
+        }
+
+        private Object openSession(String sessionId, JsonObject params) {
+            if (sessions.size() >= MAX_SESSIONS && !sessions.containsKey(sessionId)) {
+                throw new IllegalStateException("Agent session limit reached: " + MAX_SESSIONS);
+            }
+            Session created = new Session(openClient(params));
+            Session existing = sessions.putIfAbsent(sessionId, created);
+            if (existing != null) {
+                created.close();
+                throw new IllegalStateException("Agent session already exists: " + sessionId);
+            }
+            return Collections.singletonMap("ok", true);
+        }
+
+        private Object closeSession(String sessionId) {
+            Session removed = sessions.remove(sessionId);
+            if (removed != null) {
+                removed.close();
+            }
+            return Collections.singletonMap("ok", true);
+        }
+
+        private Session session(String sessionId) {
+            Session session = sessions.get(sessionId);
+            if (session == null) {
+                throw new IllegalStateException("Agent session not found: " + sessionId);
+            }
+            return session;
+        }
+
+        private void closeAllSessions() {
+            for (String sessionId : sessions.keySet()) {
+                closeSession(sessionId);
+            }
+        }
+
+        private static String requiredSessionId(JsonObject params) {
+            if (!params.has("agentSessionId") || params.get("agentSessionId").getAsString().trim().isEmpty()) {
+                throw new IllegalArgumentException("agentSessionId is required");
+            }
+            return params.get("agentSessionId").getAsString();
+        }
+
+        private void writeResponse(String response) {
+            synchronized (outputLock) {
+                System.out.println(response);
+                System.out.flush();
+            }
+        }
+    }
+
+    private static final class Session {
+        private final MongoClient client;
+
+        private Session(MongoClient client) {
+            this.client = client;
+        }
+
+        private synchronized Object handle(String method, JsonObject params) {
+            CURRENT_CLIENT.set(client);
+            try {
+                return dispatch(method, params);
+            } finally {
+                CURRENT_CLIENT.remove();
+            }
+        }
+
+        private Object validate(JsonObject params) {
+            JsonObject connection = params.has("connection") && params.get("connection").isJsonObject()
+                ? params.getAsJsonObject("connection")
+                : params;
+            String database = defaultString(stringOrNull(connection, "database"), "admin");
+            client.getDatabase(database).runCommand(new Document("ping", 1));
+            return Collections.singletonMap("ok", true);
+        }
+
+        private synchronized void close() {
+            client.close();
         }
     }
 }
