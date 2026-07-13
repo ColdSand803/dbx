@@ -6704,7 +6704,7 @@ function openActiveColumnDetailDialog() {
 function openRowDetailDialog(rowId: number) {
   rowDetailDialogRowId.value = rowId;
   rowDetailValueView.value = "raw";
-  rowDetailFieldJsonView.value = {};
+  rowDetailFieldJsonView.value = Object.fromEntries((rowDetail.value?.fields ?? []).filter((field) => !!field.formattedJson).map((field) => [rowDetailFieldKey(field), true]));
   rowDetailDialogOpen.value = true;
 }
 
