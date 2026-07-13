@@ -23,18 +23,26 @@ const containerLabel = computed(() => (Array.isArray(props.value) ? `Array (${pr
       <span>{{ containerLabel }}</span>
     </button>
     <table v-show="expanded && isRecord(value)" class="json-value-table">
+      <thead>
+        <tr>
+          <th v-for="(_, key) in value as Record<string, unknown>" :key="key">{{ key }}</th>
+        </tr>
+      </thead>
       <tbody>
-        <tr v-for="(item, key) in value as Record<string, unknown>" :key="key">
-          <th>{{ key }}</th>
-          <td><JsonValueTable :value="item" /></td>
+        <tr>
+          <td v-for="(item, key) in value as Record<string, unknown>" :key="key"><JsonValueTable :value="item" /></td>
         </tr>
       </tbody>
     </table>
     <table v-show="expanded && Array.isArray(value)" class="json-value-table">
+      <thead>
+        <tr>
+          <th v-for="(_, index) in value as unknown[]" :key="index">{{ index }}</th>
+        </tr>
+      </thead>
       <tbody>
-        <tr v-for="(item, index) in value as unknown[]" :key="index">
-          <th>{{ index }}</th>
-          <td><JsonValueTable :value="item" /></td>
+        <tr>
+          <td v-for="(item, index) in value as unknown[]" :key="index"><JsonValueTable :value="item" /></td>
         </tr>
       </tbody>
     </table>
