@@ -43,10 +43,10 @@ const containerLabel = computed(() => (Array.isArray(props.value) ? `Array (${pr
 </template>
 
 <style scoped>
-.json-value-table { width: max-content; min-width: 100%; border-collapse: collapse; font-family: var(--dbx-editor-font-family); font-size: 0.75rem; }
+.json-value-table { width: auto; max-width: 100%; border-collapse: collapse; font-family: var(--dbx-editor-font-family); font-size: 0.75rem; }
 .json-value-table th, .json-value-table td { border: 1px solid var(--border); padding: 0.35rem 0.5rem; text-align: left; vertical-align: top; }
-.json-value-table th { min-width: 10rem; max-width: 20rem; color: var(--muted-foreground); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.json-value-table td { min-width: 14rem; }
+.json-value-table th { width: 1%; max-width: 20rem; color: var(--muted-foreground); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.json-value-table td { min-width: 0; }
 .json-value-toggle { display: flex; align-items: center; gap: 0.25rem; width: 100%; padding: 0.25rem 0.4rem; color: var(--muted-foreground); font-size: 0.7rem; text-align: left; }
 .json-value-toggle:hover { background: var(--accent); color: var(--foreground); }
 </style>
