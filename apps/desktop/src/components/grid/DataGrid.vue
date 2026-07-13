@@ -82,6 +82,7 @@ import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ImagePreviewDialog from "@/components/grid/ImagePreviewDialog.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
+import JsonValueTable from "@/components/grid/JsonValueTable.vue";
 import type { QueryResult, ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo, TableInfoTab } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
@@ -140,8 +141,10 @@ import {
   dataGridRowDetailJson,
   dataGridRowDetailTsv,
   filterDataGridDetailFields,
+  jsonDetailDisplayValue,
   type DataGridCellDetail,
 } from "@/lib/dataGrid/dataGridDetail";
+import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
 import { applyColumnFormatter, buildColumnFormatterKey, normalizeColumnFormatter, resolveColumnFormatter, type ColumnFormatterConfig, type DateTimeFormatterUnit, DateTimePatterns } from "@/lib/dataGrid/columnFormatter";
 import { temporalCellEditorConfig, type TemporalCellEditorConfig } from "@/lib/dataGrid/dataGridTemporalEditor";
 import { isCancelSearchShortcut, isCopyCurrentRowShortcut, isDeleteCurrentRowShortcut, isFocusSearchShortcut, isModRShortcut, isSaveShortcut, isToggleTransposeShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -529,6 +532,9 @@ const rowDetailDialogRowId = ref<number | null>(null);
 const columnDetailDialogOpen = ref(false);
 const columnDetailDialogColumnIndex = ref<number | null>(null);
 const rowDetailSearch = ref("");
+const rowDetailJsonSearch = ref("");
+const rowDetailJsonSearchInput = ref<HTMLInputElement>();
+const rowDetailJsonMatchIndex = ref(0);
 const columnDetailSearch = ref("");
 const rowDetailValueView = ref<DetailValueViewMode>("raw");
 const rowDetailFieldJsonView = ref<Record<string, boolean>>({});
@@ -4980,6 +4986,9 @@ const rowDetailJsonView = computed(() => rowDetailValueView.value === "json" && 
 const rowDetailJsonText = computed(() => {
   return rowDetail.value ? dataGridRowDetailJson(rowDetail.value, rowDetailMongoDocument.value) : "";
 });
+const rowDetailJsonMatches = computed(() => findDocumentTextMatches(rowDetailJsonText.value, rowDetailJsonSearch.value));
+const rowDetailJsonActiveMatchIndex = computed(() => Math.min(rowDetailJsonMatchIndex.value, Math.max(0, rowDetailJsonMatches.value.length - 1)));
+const rowDetailJsonHtml = computed(() => renderDocumentJsonHtml(rowDetailJsonText.value, rowDetailJsonSearch.value, rowDetailJsonActiveMatchIndex.value));
 
 const filteredColumnDetailFields = computed(() => (columnDetail.value ? filterDataGridDetailFields(columnDetail.value.fields, columnDetailSearch.value) : []));
 const columnDetailHasFormattedJson = computed(() => filteredColumnDetailFields.value.some((field) => !!field.formattedJson));
@@ -4993,10 +5002,34 @@ watch(rowDetailDialogOpen, (open) => {
   if (!open) {
     rowDetailDialogRowId.value = null;
     rowDetailSearch.value = "";
+    rowDetailJsonSearch.value = "";
+    rowDetailJsonMatchIndex.value = 0;
     rowDetailValueView.value = "raw";
     rowDetailFieldJsonView.value = {};
   }
 });
+
+watch([rowDetailJsonSearch, rowDetailJsonText], () => {
+  rowDetailJsonMatchIndex.value = 0;
+});
+
+function rowDetailFieldDisplayValue(field: DataGridCellDetail): unknown {
+  return jsonDetailDisplayValue(field.value);
+}
+
+function focusRowDetailJsonSearch() {
+  rowDetailValueView.value = "json";
+  void nextTick(() => {
+    rowDetailJsonSearchInput.value?.focus();
+    rowDetailJsonSearchInput.value?.select();
+  });
+}
+
+function moveRowDetailJsonMatch(delta: -1 | 1) {
+  const count = rowDetailJsonMatches.value.length;
+  if (count === 0) return;
+  rowDetailJsonMatchIndex.value = (rowDetailJsonActiveMatchIndex.value + delta + count) % count;
+}
 
 watch(columnDetailDialogOpen, (open) => {
   if (!open) {
@@ -11136,7 +11169,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
     </Dialog>
 
     <Dialog v-model:open="rowDetailDialogOpen">
-      <DialogContent v-if="rowDetail" class="sm:max-w-[960px] max-h-[85vh] flex flex-col overflow-hidden">
+      <DialogContent v-if="rowDetail" class="sm:max-w-[960px] max-h-[85vh] flex flex-col overflow-hidden" @keydown.ctrl.f.prevent="focusRowDetailJsonSearch">
         <DialogHeader class="shrink-0 pr-8">
           <DialogTitle class="flex min-w-0 items-center gap-2 text-sm">
             <ListTree class="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -11158,10 +11191,15 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input v-model="rowDetailSearch" :placeholder="t('grid.detailSearchPlaceholder')" class="h-7 pl-7 text-xs" />
           </div>
+          <div v-else class="relative ml-2 w-56 max-w-full">
+            <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input ref="rowDetailJsonSearchInput" v-model="rowDetailJsonSearch" :placeholder="t('editor.search.find')" class="h-7 pl-7 pr-12 text-xs" @keydown.enter.prevent="moveRowDetailJsonMatch($event.shiftKey ? -1 : 1)" />
+            <span class="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">{{ rowDetailJsonMatches.length ? `${rowDetailJsonActiveMatchIndex + 1}/${rowDetailJsonMatches.length}` : "0/0" }}</span>
+          </div>
         </div>
 
         <div v-if="rowDetailJsonView" class="min-h-0 flex-1 overflow-auto rounded border bg-muted/20">
-          <pre class="p-3 font-mono text-xs whitespace-pre-wrap break-words">{{ rowDetailJsonText }}</pre>
+          <pre class="p-3 font-mono text-xs whitespace-pre-wrap break-words" v-html="rowDetailJsonHtml" />
         </div>
         <div v-else class="min-h-0 flex-1 overflow-auto rounded border">
           <table class="w-full min-w-[640px] text-xs">
@@ -11193,7 +11231,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-48 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)">
                     <img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-48 w-full object-contain" />
                   </a>
-                  <pre v-if="rowDetailFieldJsonViewActive(field)" class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words">{{ field.formattedJson }}</pre>
+                  <JsonValueTable v-if="rowDetailFieldJsonViewActive(field)" :value="rowDetailFieldDisplayValue(field)" class="h-44 min-h-24 max-h-[70vh] resize-y overflow-auto rounded border bg-muted/20" />
                   <pre v-else class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
                   <div v-if="field.isValuePreviewTruncated && !rowDetailFieldJsonViewActive(field)" class="mt-1 text-[11px] text-muted-foreground">
                     {{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}
@@ -11213,7 +11251,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       :aria-pressed="rowDetailFieldJsonViewActive(field)"
                       @click="toggleRowDetailFieldJsonView(field)"
                     >
-                      {{ rowDetailFieldJsonViewActive(field) ? t("grid.rawValue") : t("grid.formattedJson") }}
+                      {{ rowDetailFieldJsonViewActive(field) ? t("grid.rawValue") : t("grid.formatted") }}
                     </Button>
                   </div>
                 </td>

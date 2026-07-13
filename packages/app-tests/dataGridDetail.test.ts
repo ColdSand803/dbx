@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { buildDataGridCellDetail, buildDataGridColumnDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, buildDataGridRowDetail, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, type DataGridCellDetail } from "../../apps/desktop/src/lib/dataGrid/dataGridDetail.ts";
+import { buildDataGridCellDetail, buildDataGridColumnDetail, dataGridColumnDetailJson, dataGridColumnDetailTsv, buildDataGridRowDetail, dataGridRowDetailJson, dataGridRowDetailTsv, filterDataGridDetailFields, jsonDetailDisplayValue, type DataGridCellDetail } from "../../apps/desktop/src/lib/dataGrid/dataGridDetail.ts";
 import type { CellValue } from "../../apps/desktop/src/lib/dataGrid/cellValue.ts";
 
 test("buildDataGridCellDetail returns null for an invalid column", () => {
@@ -222,6 +222,13 @@ test("dataGridRowDetailJson uses the original MongoDB document for nested values
 
   assert.equal(dataGridRowDetailJson(detail, document), JSON.stringify(document, null, 2));
   assert.doesNotMatch(dataGridRowDetailJson(detail, document), /\\"\\$oid\\"/);
+});
+
+test("jsonDetailDisplayValue expands JSON stored in MongoDB string fields", () => {
+  assert.deepEqual(
+    jsonDetailDisplayValue({ imparts: '{"insImpart":[{"impartId":"40-936","impartAnswer":"N,,"}]}' }),
+    { imparts: { insImpart: [{ impartId: "40-936", impartAnswer: "N,," }] } },
+  );
 });
 test("buildDataGridColumnDetail maps a whole column across rows", () => {
   const typeByColumn = new Map([["name", "varchar"]]);

@@ -936,6 +936,7 @@ export default withEnglishFallback({
     emptyStringValue: "空字符串",
     noComment: "暂无注释",
     formattedJson: "格式化 JSON",
+    formatted: "格式化",
     formattedValue: "格式化值",
     detailSearchPlaceholder: "搜索字段名或值…",
     detailSearchNoMatch: "无匹配项",

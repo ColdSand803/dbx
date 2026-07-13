@@ -876,6 +876,7 @@ export default withEnglishFallback({
     nullValue: "NULL",
     noComment: "暫無註解",
     formattedJson: "格式化 JSON",
+    formatted: "格式化",
     formattedValue: "格式化值",
     detailSearchPlaceholder: "搜尋欄位名或值…",
     detailSearchNoMatch: "無相符項目",

@@ -872,6 +872,7 @@ export default withEnglishFallback({
     nullValue: "NULL",
     noComment: "コメントなし",
     formattedJson: "フォーマット済みJSON",
+    formatted: "整形済み",
     formattedValue: "フォーマット済み値",
     detailSearchPlaceholder: "フィールドまたは値を検索…",
     detailSearchNoMatch: "一致なし",
