@@ -11231,7 +11231,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <a v-if="field.imagePreviewUrl" :href="field.imagePreviewUrl" role="button" class="mb-2 block max-h-48 overflow-hidden rounded border bg-muted/20" @click.prevent="openImagePreview(field.imagePreviewUrl, field.column)">
                     <img :src="field.imagePreviewUrl" :alt="field.column" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="max-h-48 w-full object-contain" />
                   </a>
-                  <JsonValueTable v-if="rowDetailFieldJsonViewActive(field)" :value="rowDetailFieldDisplayValue(field)" class="max-h-44 overflow-auto rounded border bg-muted/20" />
+                  <JsonValueTable v-if="rowDetailFieldJsonViewActive(field)" :value="rowDetailFieldDisplayValue(field)" class="h-44 min-h-24 max-h-[70vh] resize-y overflow-auto rounded border bg-muted/20" />
                   <pre v-else class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words" :class="{ 'italic text-muted-foreground': field.value === null }">{{ field.rawValuePreview }}</pre>
                   <div v-if="field.isValuePreviewTruncated && !rowDetailFieldJsonViewActive(field)" class="mt-1 text-[11px] text-muted-foreground">
                     {{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}
