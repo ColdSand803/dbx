@@ -78,12 +78,14 @@ test("extracts nested document field paths for structured filters", () => {
 });
 
 test("builds hierarchical document field path tree for array objects", () => {
-  const tree = documentFieldPathTreeFromDocuments([{ _id: "1", orders: [{ sku: "A", qty: 2 }], tags: ["a"], profile: { address: { zip: 1 } } }]);
+  const tree = documentFieldPathTreeFromDocuments([{ _id: "1", orders: [{ sku: "A", qty: 2 }], batches: [[{ lot: "L-1" }]], tags: ["a"], profile: { address: { zip: 1 } } }]);
   const flattened = flattenDocumentFieldPathTree(tree);
   const orders = tree.find((node) => node.path === "orders");
+  const batches = tree.find((node) => node.path === "batches");
   const sku = flattened.find((node) => node.path === "orders.sku");
 
   assert.equal(orders?.kind, "array-object");
+  assert.equal(batches?.kind, "array-object");
   assert.equal(orders?.label, "orders[]");
   assert.equal(sku?.path, "orders.sku");
   assert.equal(sku?.displayPath, "orders[] > sku");
@@ -92,7 +94,7 @@ test("builds hierarchical document field path tree for array objects", () => {
   assert.equal(arrayObjectAncestorPathForDocumentField(tree, "profile.address.zip"), null);
   assert.deepEqual(
     flattened.map((node) => node.path),
-    ["_id", "orders", "orders.sku", "orders.qty", "tags", "profile", "profile.address", "profile.address.zip"],
+    ["_id", "orders", "orders.sku", "orders.qty", "batches", "batches.lot", "tags", "profile", "profile.address", "profile.address.zip"],
   );
 });
 

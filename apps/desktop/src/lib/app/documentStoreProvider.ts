@@ -172,12 +172,18 @@ function collectDocumentFieldPathNode(nodes: DocumentFieldPathAccumulatorNode[],
   if (node.sampleValue === undefined) node.sampleValue = value;
   if (depth >= 6) return;
   if (Array.isArray(value)) {
-    for (const item of value) {
-      if (isPlainRecord(item)) collectNestedDocumentFieldPathNodes(node, item, depth + 1);
-    }
+    collectArrayDocumentFieldPathNodes(node, value, depth + 1);
     return;
   }
   if (isPlainRecord(value)) collectNestedDocumentFieldPathNodes(node, value, depth + 1);
+}
+
+function collectArrayDocumentFieldPathNodes(parent: DocumentFieldPathAccumulatorNode, values: readonly unknown[], depth: number): void {
+  if (depth > 6) return;
+  for (const value of values) {
+    if (Array.isArray(value)) collectArrayDocumentFieldPathNodes(parent, value, depth + 1);
+    else if (isPlainRecord(value)) collectNestedDocumentFieldPathNodes(parent, value, depth);
+  }
 }
 
 function collectNestedDocumentFieldPathNodes(parent: DocumentFieldPathAccumulatorNode, value: Record<string, unknown>, depth: number): void {
@@ -205,9 +211,13 @@ function ensureDocumentFieldPathNode(nodes: DocumentFieldPathAccumulatorNode[], 
 }
 
 function documentFieldPathKindFromValue(value: unknown): DocumentFieldPathKind {
-  if (Array.isArray(value)) return value.some(isPlainRecord) ? "array-object" : "array";
+  if (Array.isArray(value)) return arrayContainsPlainRecord(value) ? "array-object" : "array";
   if (isPlainRecord(value)) return "object";
   return "scalar";
+}
+
+function arrayContainsPlainRecord(values: readonly unknown[]): boolean {
+  return values.some((value) => isPlainRecord(value) || (Array.isArray(value) && arrayContainsPlainRecord(value)));
 }
 
 function mergeDocumentFieldPathKind(current: DocumentFieldPathKind, next: DocumentFieldPathKind): DocumentFieldPathKind {
