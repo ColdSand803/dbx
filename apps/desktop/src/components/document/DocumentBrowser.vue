@@ -59,6 +59,7 @@ const props = defineProps<{
 
 type JsonRecord = Record<string, unknown>;
 type ViewMode = "document" | "table";
+type DocumentEditMode = "fields" | "json";
 
 const documents = ref<JsonRecord[]>([]);
 const lastGridColumns = ref<string[]>([]);
@@ -75,6 +76,8 @@ const isEditing = ref(false);
 const isNew = ref(false);
 const error = ref("");
 const editFields = ref<EditNode[]>([]);
+const editMode = ref<DocumentEditMode>("fields");
+const nativeDocumentText = ref("");
 const showDeleteConfirm = ref(false);
 const viewMode = computed<ViewMode>({
   get: () => settingsStore.editorSettings.mongoViewMode,
@@ -86,10 +89,12 @@ const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
 const documentViewerRef = ref<HTMLElement>();
+const nativeDocumentEditorRef = ref<HTMLTextAreaElement>();
 const documentSearchInputRef = ref<HTMLInputElement>();
 const documentSearchOpen = ref(false);
 const documentSearchQuery = ref("");
 const documentSearchMatchIndex = ref(0);
+const documentSearchHasNavigated = ref(false);
 const documentViewerSearchActive = ref(false);
 const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
@@ -137,7 +142,8 @@ const selectedDoc = computed(() => {
   if (selectedIdx.value === null) return null;
   return documents.value[selectedIdx.value] ?? null;
 });
-const documentSearchMatches = computed(() => findDocumentTextMatches(editJson.value, documentSearchQuery.value));
+const documentSearchText = computed(() => (isEditing.value && editMode.value === "json" ? nativeDocumentText.value : editJson.value));
+const documentSearchMatches = computed(() => findDocumentTextMatches(documentSearchText.value, documentSearchQuery.value));
 const documentSearchActiveIndex = computed(() => {
   if (documentSearchMatches.value.length === 0) return 0;
   return Math.min(documentSearchMatchIndex.value, documentSearchMatches.value.length - 1);
@@ -702,6 +708,8 @@ function startNew() {
   selectedIdx.value = null;
   editJson.value = "";
   editFields.value = [createEditNode("", "", false, false)];
+  nativeDocumentText.value = "{}";
+  editMode.value = "fields";
   isEditing.value = true;
   isNew.value = true;
 }
@@ -713,6 +721,8 @@ function startEdit() {
     const readonlyMetadata = name === "_id" || (documentStoreProvider.value.kind === "elasticsearch" && name === "_routing");
     return createEditNode(name, value, readonlyMetadata, readonlyMetadata);
   });
+  nativeDocumentText.value = JSON.stringify(doc, null, 2);
+  editMode.value = "fields";
   isEditing.value = true;
   isNew.value = false;
 }
@@ -722,12 +732,16 @@ function cancelEdit() {
   if (isNew.value) {
     isNew.value = false;
     editFields.value = [];
+    nativeDocumentText.value = "";
+    editMode.value = "fields";
     return;
   }
   if (selectedDoc.value) {
     editJson.value = JSON.stringify(selectedDoc.value, null, 2);
   }
   editFields.value = [];
+  nativeDocumentText.value = "";
+  editMode.value = "fields";
   error.value = "";
 }
 
@@ -822,10 +836,43 @@ function buildDocumentFromFields(): JsonRecord {
   return buildObjectFromNodes(editFields.value, "");
 }
 
+function buildDocumentFromNativeText(): JsonRecord {
+  let value: unknown;
+  try {
+    value = JSON.parse(nativeDocumentText.value);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    throw new Error(t("mongo.invalidNativeJson", { error: message }));
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(t("mongo.nativeDocumentRequired"));
+  }
+  return value as JsonRecord;
+}
+
+function setEditMode(mode: DocumentEditMode) {
+  if (mode === editMode.value) return;
+  error.value = "";
+  try {
+    if (mode === "json") {
+      nativeDocumentText.value = JSON.stringify(buildDocumentFromFields(), null, 2);
+    } else {
+      const doc = buildDocumentFromNativeText();
+      editFields.value = Object.entries(doc).map(([name, value]) => {
+        const readonlyMetadata = name === "_id" || (documentStoreProvider.value.kind === "elasticsearch" && name === "_routing");
+        return createEditNode(name, value, readonlyMetadata, readonlyMetadata);
+      });
+    }
+    editMode.value = mode;
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : String(e);
+  }
+}
+
 async function saveDoc() {
   error.value = "";
   try {
-    const doc = buildDocumentFromFields();
+    const doc = editMode.value === "json" ? buildDocumentFromNativeText() : buildDocumentFromFields();
     if (isNew.value) {
       await api.documentInsertDocument(props.connectionId, props.database, props.collection, JSON.stringify(doc));
     } else if (selectedIdx.value !== null) {
@@ -909,12 +956,15 @@ function highlightedJson(json: string): string {
 
 function handleDocumentBrowserPointerDown(event: PointerEvent) {
   const target = event.target;
-  documentViewerSearchActive.value = target instanceof Element && !!target.closest("[data-document-json-viewer], [data-document-search]");
+  documentViewerSearchActive.value = target instanceof Element && !!target.closest("[data-document-json-viewer], [data-document-native-editor], [data-document-search]");
 }
 
 function focusSearch(): boolean {
-  if (viewMode.value !== "document" || isEditing.value || selectedIdx.value === null || !documentViewerSearchActive.value) return false;
+  if (viewMode.value !== "document" || !documentViewerSearchActive.value) return false;
+  if (isEditing.value && editMode.value !== "json") return false;
+  if (!isNew.value && selectedIdx.value === null) return false;
   documentSearchOpen.value = true;
+  documentSearchHasNavigated.value = false;
   void nextTick(() => {
     documentSearchInputRef.value?.focus();
     documentSearchInputRef.value?.select();
@@ -924,23 +974,45 @@ function focusSearch(): boolean {
 
 function closeDocumentSearch() {
   documentSearchOpen.value = false;
-  void nextTick(() => documentViewerRef.value?.focus());
+  void nextTick(() => {
+    if (isEditing.value && editMode.value === "json") nativeDocumentEditorRef.value?.focus();
+    else documentViewerRef.value?.focus();
+  });
 }
 
 function moveDocumentSearchMatch(delta: -1 | 1) {
   const count = documentSearchMatches.value.length;
   if (count === 0) return;
   documentSearchMatchIndex.value = (documentSearchActiveIndex.value + delta + count) % count;
+  documentSearchHasNavigated.value = true;
   void scrollDocumentSearchMatchIntoView();
+}
+
+function activateDocumentSearchMatch(delta: -1 | 1) {
+  if (documentSearchMatches.value.length === 0) return;
+  if (!documentSearchHasNavigated.value) {
+    documentSearchHasNavigated.value = true;
+    void scrollDocumentSearchMatchIntoView();
+    return;
+  }
+  moveDocumentSearchMatch(delta);
 }
 
 async function scrollDocumentSearchMatchIntoView() {
   await nextTick();
+  if (isEditing.value && editMode.value === "json") {
+    const match = documentSearchMatches.value[documentSearchActiveIndex.value];
+    if (!match) return;
+    nativeDocumentEditorRef.value?.focus({ preventScroll: true });
+    nativeDocumentEditorRef.value?.setSelectionRange(match.start, match.end);
+    return;
+  }
   documentViewerRef.value?.querySelector<HTMLElement>('[data-document-search-active="true"]')?.scrollIntoView({ block: "center", inline: "nearest" });
 }
 
-watch([documentSearchQuery, editJson], () => {
+watch([documentSearchQuery, documentSearchText], () => {
   documentSearchMatchIndex.value = 0;
+  documentSearchHasNavigated.value = false;
   void scrollDocumentSearchMatchIntoView();
 });
 
@@ -1396,16 +1468,20 @@ defineExpose({ focusSearch });
               <span class="flex-1" />
               <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" @click="startEdit">{{ t("mongo.edit") }}</Button>
               <template v-if="isEditing">
-                <Button variant="ghost" size="sm" class="h-6 text-xs" @click="addField"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
+                <div class="flex items-center rounded-md border bg-background/70 p-0.5">
+                  <Button variant="ghost" size="sm" class="h-6 px-2 text-xs" :class="{ 'bg-accent': editMode === 'fields' }" @click="setEditMode('fields')">{{ t("mongo.fieldEditor") }}</Button>
+                  <Button variant="ghost" size="sm" class="h-6 px-2 text-xs" :class="{ 'bg-accent': editMode === 'json' }" @click="setEditMode('json')">{{ t("mongo.nativeJson") }}</Button>
+                </div>
+                <Button v-if="editMode === 'fields'" variant="ghost" size="sm" class="h-6 text-xs" @click="addField"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
                 <Button variant="ghost" size="sm" class="h-6 text-xs" @click="cancelEdit">{{ t("grid.discard") }}</Button>
                 <Button size="sm" class="h-6 text-xs" @click="saveDoc"><Save class="w-3 h-3 mr-1" />{{ t("grid.save") }}</Button>
               </template>
             </div>
 
-            <div v-if="documentSearchOpen && !isEditing" data-document-search class="flex h-9 shrink-0 items-center justify-end gap-1 border-b bg-background px-2">
+            <div v-if="documentSearchOpen && (!isEditing || editMode === 'json')" data-document-search class="flex h-9 shrink-0 items-center justify-end gap-1 border-b bg-background px-2">
               <div class="relative w-56 max-w-[45%] min-w-32">
                 <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input ref="documentSearchInputRef" v-model="documentSearchQuery" class="h-7 pl-7 pr-2 text-xs" :placeholder="t('editor.search.find')" @keydown.enter.prevent="moveDocumentSearchMatch($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeDocumentSearch" />
+                <Input ref="documentSearchInputRef" v-model="documentSearchQuery" class="h-7 pl-7 pr-2 text-xs" :placeholder="t('editor.search.find')" @keydown.enter.prevent="activateDocumentSearchMatch($event.shiftKey ? -1 : 1)" @keydown.escape.prevent="closeDocumentSearch" />
               </div>
               <span class="w-12 text-center text-[11px] tabular-nums text-muted-foreground">{{ documentSearchStatus }}</span>
               <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('editor.search.prevMatch')" :disabled="documentSearchMatches.length === 0" @click="moveDocumentSearchMatch(-1)">
@@ -1419,7 +1495,7 @@ defineExpose({ focusSearch });
               </Button>
             </div>
 
-            <div v-if="isEditing" class="flex-1 overflow-auto bg-muted/10">
+            <div v-if="isEditing && editMode === 'fields'" class="flex-1 overflow-auto bg-muted/10">
               <div class="json-edit min-w-fit p-5" :style="{ ...documentFontStyle, '--mongo-key-width': editKeyWidth }">
                 <div class="json-edit-brace">{</div>
 
@@ -1429,6 +1505,11 @@ defineExpose({ focusSearch });
 
                 <div class="json-edit-brace">}</div>
               </div>
+            </div>
+
+            <div v-else-if="isEditing" class="flex min-h-0 flex-1 flex-col bg-muted/10 p-4">
+              <textarea ref="nativeDocumentEditorRef" v-model="nativeDocumentText" data-document-native-editor class="native-document-editor flex-1" :style="documentFontStyle" autocapitalize="off" autocorrect="off" spellcheck="false" :aria-label="t('mongo.nativeJson')" />
+              <p class="mt-2 text-xs text-muted-foreground">{{ t("mongo.nativeJsonHint") }}</p>
             </div>
 
             <div v-else ref="documentViewerRef" data-document-json-viewer tabindex="-1" class="flex-1 overflow-auto bg-muted/10 outline-none">
@@ -1483,6 +1564,27 @@ defineExpose({ focusSearch });
 .json-edit-add {
   margin: 6px 0 6px 2ch;
   font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.native-document-editor {
+  width: 100%;
+  min-height: 0;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 14px 16px;
+  line-height: 1.6;
+  tab-size: 2;
+  outline: none;
+  white-space: pre;
+  overflow: auto;
+}
+
+.native-document-editor:focus {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ring) 28%, transparent);
 }
 
 :deep(.json-key) {

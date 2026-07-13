@@ -895,7 +895,7 @@ pub async fn update_document(
 ) -> Result<u64, String> {
     let value: serde_json::Value = serde_json::from_str(doc_json).map_err(|e| format!("Invalid JSON: {e}"))?;
     let col = client.database(database).collection::<Document>(collection);
-    let update_doc = json_object_to_document(&value).map_err(|e| format!("Invalid document: {e}"))?;
+    let update_doc = json_object_to_document_for_update(&value, None).map_err(|e| format!("Invalid document: {e}"))?;
     if is_update_operator_document(&update_doc) {
         for filter in document_id_filters(id) {
             let result = col.update_one(filter, update_doc.clone()).await.map_err(|e| e.to_string())?;
@@ -908,7 +908,7 @@ pub async fn update_document(
 
     for filter in document_id_filters(id) {
         let current = col.find_one(filter.clone()).await.map_err(|e| e.to_string())?;
-        let mut new_doc = json_object_to_document_preserving_existing(&value, current.as_ref())
+        let mut new_doc = json_object_to_document_for_update(&value, current.as_ref())
             .map_err(|e| format!("Invalid document: {e}"))?;
         new_doc.remove("_id");
         let result = col.replace_one(filter, new_doc.clone()).await.map_err(|e| e.to_string())?;
@@ -1074,6 +1074,51 @@ fn json_object_to_document_preserving_existing(
             })
             .collect()),
         _ => json_object_to_document(value),
+    }
+}
+
+/// Parse raw document-editor input without losing MongoDB Extended JSON values.
+///
+/// The document viewer returns relaxed Extended JSON, so prefer the driver's full
+/// Extended JSON decoder whenever a canonical wrapper is present. Older callers
+/// that send ordinary JSON retain the existing type-preservation behavior.
+fn json_object_to_document_for_update(
+    value: &serde_json::Value,
+    existing: Option<&Document>,
+) -> Result<Document, String> {
+    if contains_extended_json_wrapper(value) {
+        json_object_to_document_extended_json(value)
+    } else {
+        json_object_to_document_preserving_existing(value, existing)
+    }
+}
+
+fn contains_extended_json_wrapper(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values.iter().any(contains_extended_json_wrapper),
+        serde_json::Value::Object(object) => {
+            object.keys().any(|key| {
+                matches!(
+                    key.as_str(),
+                    "$oid"
+                        | "$date"
+                        | "$numberInt"
+                        | "$numberLong"
+                        | "$numberDouble"
+                        | "$numberDecimal"
+                        | "$binary"
+                        | "$regularExpression"
+                        | "$timestamp"
+                        | "$minKey"
+                        | "$maxKey"
+                        | "$undefined"
+                        | "$symbol"
+                        | "$code"
+                        | "$dbPointer"
+                )
+            }) || object.values().any(contains_extended_json_wrapper)
+        }
+        _ => false,
     }
 }
 
