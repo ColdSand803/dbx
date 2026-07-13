@@ -176,7 +176,8 @@ function detailColumnType(typeByColumn: ReadonlyMap<string, string> | undefined,
   return resultColumnTypes?.[columnIndex]?.trim() ?? "";
 }
 
-export function dataGridRowDetailJson(detail: DataGridRowDetail): string {
+export function dataGridRowDetailJson(detail: DataGridRowDetail, originalDocument?: unknown): string {
+  if (originalDocument !== undefined) return JSON.stringify(originalDocument, null, 2);
   const row: Record<string, CellValue> = {};
   detail.fields.forEach((field) => {
     row[field.column] = field.value;

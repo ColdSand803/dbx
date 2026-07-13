@@ -17,6 +17,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
 import {
+  arrayObjectAncestorPathForDocumentField,
   buildDocumentFilterCondition,
   combineDocumentFilterConditions,
   currentDocumentFilterJson,
@@ -177,7 +178,7 @@ const gridResult = computed<QueryResult>(() => {
     }),
   );
 
-  return { columns, rows, affected_rows: 0, execution_time_ms: 0, truncated: false };
+  return { columns, rows, mongo_documents: props.databaseType === "mongodb" ? docs : undefined, affected_rows: 0, execution_time_ms: 0, truncated: false };
 });
 const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
 const documentFilterFieldTree = computed<DocumentFieldPathNode[]>(() => {
@@ -337,12 +338,16 @@ async function applyDocumentStructuredFilters() {
   const items = documentFilterRules.value
     .map((rule) => ({
       rule,
-      condition: buildDocumentFilterCondition(rule, { kind: documentStoreProvider.value.kind }),
+      condition: buildDocumentFilterCondition(rule, {
+        kind: documentStoreProvider.value.kind,
+        sampleValue: documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
+      }),
     }))
     .filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);
   const structured = combineDocumentFilterConditions(
     items.map((item) => item.condition),
     items.map((item) => item.rule),
+    items.map((item) => arrayObjectAncestorPathForDocumentField(documentFilterFieldTree.value, item.rule.fieldName)),
   );
   appliedDocumentFilter.value = structured;
   documentFilterBuilderOpen.value = false;

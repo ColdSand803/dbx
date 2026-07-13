@@ -23,6 +23,7 @@ export type DocumentFieldPathNode = {
   displayPath: string;
   kind: DocumentFieldPathKind;
   selectable: boolean;
+  sampleValue?: unknown;
   children: DocumentFieldPathNode[];
 };
 
@@ -113,6 +114,7 @@ type DocumentFieldPathAccumulatorNode = {
   key: string;
   path: string;
   kind: DocumentFieldPathKind;
+  sampleValue?: unknown;
   children: DocumentFieldPathAccumulatorNode[];
   childByKey: Map<string, DocumentFieldPathAccumulatorNode>;
 };
@@ -145,9 +147,21 @@ export function flattenDocumentFieldPathTree(nodes: readonly DocumentFieldPathNo
   return flattened;
 }
 
+export function arrayObjectAncestorPathForDocumentField(nodes: readonly DocumentFieldPathNode[], path: string): string | null {
+  for (const node of nodes) {
+    if (node.path === path) return null;
+    if (path.startsWith(`${node.path}.`)) {
+      if (node.kind === "array-object") return node.path;
+      return arrayObjectAncestorPathForDocumentField(node.children, path);
+    }
+  }
+  return null;
+}
+
 function collectDocumentFieldPathNode(nodes: DocumentFieldPathAccumulatorNode[], byKey: Map<string, DocumentFieldPathAccumulatorNode>, path: string, value: unknown, depth = 0): void {
   const key = path.split(".").pop() || path;
   const node = ensureDocumentFieldPathNode(nodes, byKey, key, path, documentFieldPathKindFromValue(value));
+  if (node.sampleValue === undefined) node.sampleValue = value;
   if (depth >= 6) return;
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -206,6 +220,7 @@ function finalizeDocumentFieldPathNodes(nodes: readonly DocumentFieldPathAccumul
       displayPath: displaySegments.join(" > "),
       kind: node.kind,
       selectable: true,
+      sampleValue: node.sampleValue,
       children: finalizeDocumentFieldPathNodes(node.children, displaySegments),
     };
   });
@@ -213,6 +228,7 @@ function finalizeDocumentFieldPathNodes(nodes: readonly DocumentFieldPathAccumul
 
 type DocumentFilterParseOptions = {
   kind?: DocumentStoreKind;
+  sampleValue?: unknown;
 };
 
 export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: DocumentFilterParseOptions = {}): Record<string, unknown> | null {
@@ -240,14 +256,64 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
   }
 }
 
-export function combineDocumentFilterConditions(conditions: Record<string, unknown>[], rules: Pick<DocumentFilterRule, "conjunction">[]): Record<string, unknown> | null {
+export function combineDocumentFilterConditions(conditions: Record<string, unknown>[], rules: Pick<DocumentFilterRule, "conjunction">[], arrayObjectParents: Array<string | null> = []): Record<string, unknown> | null {
   if (conditions.length === 0) return null;
-  let result = conditions[0];
-  for (let i = 1; i < conditions.length; i++) {
-    const operator = rules[i]?.conjunction === "OR" ? "$or" : "$and";
-    result = { [operator]: [result, conditions[i]] };
+  const grouped = groupLeadingArrayObjectConditions(conditions, rules, arrayObjectParents);
+  let result = grouped.conditions[0];
+  for (let i = 1; i < grouped.conditions.length; i++) {
+    const operator = grouped.rules[i]?.conjunction === "OR" ? "$or" : "$and";
+    result = { [operator]: [result, grouped.conditions[i]] };
   }
   return result;
+}
+
+function groupLeadingArrayObjectConditions(conditions: Record<string, unknown>[], rules: Pick<DocumentFilterRule, "conjunction">[], arrayObjectParents: Array<string | null>): { conditions: Record<string, unknown>[]; rules: Pick<DocumentFilterRule, "conjunction">[] } {
+  const groupedConditions: Record<string, unknown>[] = [];
+  const groupedRules: Pick<DocumentFilterRule, "conjunction">[] = [];
+  let index = 0;
+
+  // A later AND after an OR is part of the left-associated expression produced below,
+  // so only the prefix before the first OR can be safely collapsed into $elemMatch.
+  while (index < conditions.length && (index === 0 || rules[index]?.conjunction !== "OR")) {
+    const parent = arrayObjectParents[index];
+    if (!parent) {
+      groupedConditions.push(conditions[index]);
+      groupedRules.push(rules[index]);
+      index++;
+      continue;
+    }
+
+    const elementConditions: Record<string, unknown>[] = [];
+    let end = index;
+    while (end < conditions.length && (end === index || rules[end]?.conjunction === "AND") && arrayObjectParents[end] === parent) {
+      const relative = relativeArrayObjectCondition(conditions[end], parent);
+      if (!relative) break;
+      elementConditions.push(relative);
+      end++;
+    }
+    if (elementConditions.length < 2) {
+      groupedConditions.push(conditions[index]);
+      groupedRules.push(rules[index]);
+      index++;
+      continue;
+    }
+    groupedConditions.push({ [parent]: { $elemMatch: { $and: elementConditions } } });
+    groupedRules.push(rules[index]);
+    index = end;
+  }
+
+  return {
+    conditions: [...groupedConditions, ...conditions.slice(index)],
+    rules: [...groupedRules, ...rules.slice(index)],
+  };
+}
+
+function relativeArrayObjectCondition(condition: Record<string, unknown>, parent: string): Record<string, unknown> | null {
+  const entries = Object.entries(condition);
+  if (entries.length !== 1) return null;
+  const [field, value] = entries[0];
+  const prefix = `${parent}.`;
+  return field.startsWith(prefix) ? { [field.slice(prefix.length)]: value } : null;
 }
 
 const MAX_SAFE_BIGINT = 9007199254740991n;
@@ -374,8 +440,16 @@ function parseDocumentFilterValue(raw: string, options: DocumentFilterParseOptio
   try {
     return parseJsonPreservingLargeIntegers(trimmed, options);
   } catch {
-    return trimmed;
+    return mongoTypedFilterValue(trimmed, options);
   }
+}
+
+function mongoTypedFilterValue(raw: string, options: DocumentFilterParseOptions): unknown {
+  if (options.kind !== "mongodb" || !isPlainRecord(options.sampleValue)) return raw;
+  if (typeof options.sampleValue.$oid === "string") return { $oid: raw };
+  if ("$date" in options.sampleValue) return { $date: raw };
+  if (typeof options.sampleValue.$numberLong === "string" && /^-?\d+$/.test(raw)) return { $numberLong: raw };
+  return raw;
 }
 
 export function elasticsearchSearchBodyFromDocumentQuery(options: Pick<DocumentStoreQueryPreviewOptions, "filterJson" | "sortJson" | "skip" | "limit">): Record<string, unknown> {

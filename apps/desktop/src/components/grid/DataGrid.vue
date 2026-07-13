@@ -4948,6 +4948,12 @@ const rowDetail = computed(() => {
   });
 });
 
+const rowDetailMongoDocument = computed(() => {
+  if (rowDetailDialogRowId.value === null || props.databaseType !== "mongodb") return undefined;
+  const item = getRowItem(rowDetailDialogRowId.value);
+  return item?.sourceIndex === undefined ? undefined : props.result.mongo_documents?.[item.sourceIndex];
+});
+
 const columnDetail = computed(() => {
   if (columnDetailDialogColumnIndex.value === null) return null;
   const columnIndex = columnDetailDialogColumnIndex.value;
@@ -4971,7 +4977,9 @@ const columnDetail = computed(() => {
 
 const filteredRowDetailFields = computed(() => (rowDetail.value ? filterDataGridDetailFields(rowDetail.value.fields, rowDetailSearch.value) : []));
 const rowDetailJsonView = computed(() => rowDetailValueView.value === "json" && !!rowDetail.value);
-const rowDetailJsonText = computed(() => (rowDetail.value ? dataGridRowDetailJson(rowDetail.value) : ""));
+const rowDetailJsonText = computed(() => {
+  return rowDetail.value ? dataGridRowDetailJson(rowDetail.value, rowDetailMongoDocument.value) : "";
+});
 
 const filteredColumnDetailFields = computed(() => (columnDetail.value ? filterDataGridDetailFields(columnDetail.value.fields, columnDetailSearch.value) : []));
 const columnDetailHasFormattedJson = computed(() => filteredColumnDetailFields.value.some((field) => !!field.formattedJson));
@@ -7384,7 +7392,7 @@ async function openDialogCellInSidePanel() {
 function copyRowDetailJson() {
   const detail = rowDetail.value;
   if (!detail) return;
-  copyText(dataGridRowDetailJson(detail));
+  copyText(rowDetailJsonText.value);
 }
 
 function copyRowDetailTsv() {
