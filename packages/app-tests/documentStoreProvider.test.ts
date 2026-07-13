@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import {
+  arrayObjectAncestorPathForDocumentField,
   buildDocumentFilterCondition,
   combineDocumentFilterConditions,
   currentDocumentFilterJson,
@@ -55,6 +56,17 @@ test("builds reusable document filter conditions", () => {
   assert.deepEqual(buildDocumentFilterCondition(rule({ mode: "is-not-null", rawValue: "" })), { city: { $ne: null } });
 });
 
+test("preserves Extended JSON types for MongoDB structured filters", () => {
+  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "profile.ownerId", rawValue: "507f1f77bcf86cd799439011" }), {
+    kind: "mongodb",
+    sampleValue: { $oid: "507f1f77bcf86cd799439011" },
+  }), { "profile.ownerId": { $oid: "507f1f77bcf86cd799439011" } });
+  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "profile.createdAt", rawValue: "2026-07-13T00:00:00Z" }), {
+    kind: "mongodb",
+    sampleValue: { $date: "2025-01-01T00:00:00Z" },
+  }), { "profile.createdAt": { $date: "2026-07-13T00:00:00Z" } });
+});
+
 test("extracts nested document field paths for structured filters", () => {
   assert.deepEqual(
     documentFieldPathOptionsFromDocuments([
@@ -75,6 +87,9 @@ test("builds hierarchical document field path tree for array objects", () => {
   assert.equal(orders?.label, "orders[]");
   assert.equal(sku?.path, "orders.sku");
   assert.equal(sku?.displayPath, "orders[] > sku");
+  assert.deepEqual(sku?.sampleValue, "A");
+  assert.equal(arrayObjectAncestorPathForDocumentField(tree, "orders.sku"), "orders");
+  assert.equal(arrayObjectAncestorPathForDocumentField(tree, "profile.address.zip"), null);
   assert.deepEqual(
     flattened.map((node) => node.path),
     ["_id", "orders", "orders.sku", "orders.qty", "tags", "profile", "profile.address", "profile.address.zip"],
@@ -83,15 +98,25 @@ test("builds hierarchical document field path tree for array objects", () => {
 
 test("searches nested document field paths", () => {
   const tree = documentFieldPathTreeFromDocuments([{ profile: { address: { zip: 200000 }, city: "Shanghai" }, orders: [{ sku: "A" }] }]);
+  assert.deepEqual(searchDocumentFieldPathTree(tree, "address").map((node) => node.path), ["profile.address", "profile.address.zip"]);
+  assert.deepEqual(searchDocumentFieldPathTree(tree, "orders[] > sku").map((node) => node.path), ["orders.sku"]);
+});
 
-  assert.deepEqual(
-    searchDocumentFieldPathTree(tree, "address").map((node) => node.path),
-    ["profile.address", "profile.address.zip"],
-  );
-  assert.deepEqual(
-    searchDocumentFieldPathTree(tree, "orders[] > sku").map((node) => node.path),
-    ["orders.sku"],
-  );
+test("uses elemMatch only for AND conditions on the same array object", () => {
+  const conditions = [{ "orders.sku": "A" }, { "orders.qty": 2 }];
+  const rules = [rule({ fieldName: "orders.sku" }), rule({ fieldName: "orders.qty", rawValue: "2", conjunction: "AND" })];
+  assert.deepEqual(combineDocumentFilterConditions(conditions, rules, ["orders", "orders"]), {
+    orders: { $elemMatch: { $and: [{ sku: "A" }, { qty: 2 }] } },
+  });
+  assert.deepEqual(combineDocumentFilterConditions([{ status: "active" }, ...conditions], [rule({ fieldName: "status" }), ...rules], [null, "orders", "orders"]), {
+    $and: [{ status: "active" }, { orders: { $elemMatch: { $and: [{ sku: "A" }, { qty: 2 }] } } }],
+  });
+  assert.deepEqual(combineDocumentFilterConditions(conditions, rules, ["orders", "lineItems"]), {
+    $and: conditions,
+  });
+  assert.deepEqual(combineDocumentFilterConditions(conditions, [rules[0], rule({ fieldName: "orders.qty", rawValue: "2", conjunction: "OR" })], ["orders", "orders"]), {
+    $or: conditions,
+  });
 });
 
 test("formats document query object input", () => {

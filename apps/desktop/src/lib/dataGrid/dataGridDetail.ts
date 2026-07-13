@@ -176,20 +176,13 @@ function detailColumnType(typeByColumn: ReadonlyMap<string, string> | undefined,
   return resultColumnTypes?.[columnIndex]?.trim() ?? "";
 }
 
-export function dataGridRowDetailJson(detail: DataGridRowDetail): string {
-  const fieldsByColumn = new Map<string, DataGridCellDetail>();
+export function dataGridRowDetailJson(detail: DataGridRowDetail, originalDocument?: unknown): string {
+  if (originalDocument !== undefined) return JSON.stringify(originalDocument, null, 2);
+  const row: Record<string, CellValue> = {};
   detail.fields.forEach((field) => {
-    fieldsByColumn.set(field.column, field);
+    row[field.column] = field.value;
   });
-  if (fieldsByColumn.size === 0) return "{}";
-
-  const entries = [...fieldsByColumn.values()].map((field) => {
-    const valueJson = field.formattedJson || JSON.stringify(field.value) || "null";
-    return `  ${JSON.stringify(field.column)}: ${indentNestedJson(valueJson)}`;
-  });
-  return `{
-${entries.join(",\n")}
-}`;
+  return JSON.stringify(row, null, 2);
 }
 
 export function dataGridRowDetailTsv(detail: DataGridRowDetail): string {
@@ -225,10 +218,4 @@ function looksLikeJsonContainer(text: string): boolean {
 function previewText(text: string): string {
   if (text.length <= CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH) return text;
   return text.slice(0, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH);
-}
-
-function indentNestedJson(valueJson: string): string {
-  const lines = valueJson.split("\n");
-  if (lines.length <= 1) return valueJson;
-  return [lines[0], ...lines.slice(1).map((line) => `  ${line}`)].join("\n");
 }

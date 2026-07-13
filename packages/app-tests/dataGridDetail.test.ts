@@ -202,25 +202,27 @@ test("dataGridRowDetailJson and dataGridRowDetailTsv format copy payloads", () =
   });
 
   assert.equal(dataGridRowDetailJson(detail), '{\n  "id": 1,\n  "name": "Ada",\n  "nickname": null\n}');
+  assert.equal(dataGridRowDetailJson(detail, { id: 1, profile: { city: "Shanghai" } }), '{\n  "id": 1,\n  "profile": {\n    "city": "Shanghai"\n  }\n}');
   assert.equal(dataGridRowDetailTsv(detail), "1\tAda\tNULL");
 });
 
-test("dataGridRowDetailJson embeds nested JSON cell values", () => {
+test("dataGridRowDetailJson uses the original MongoDB document for nested values", () => {
+  const document = {
+    _id: { $oid: "507f1f77bcf86cd799439011" },
+    profile: { createdAt: { $date: "2025-01-02T03:04:05.000Z" }, labels: ["vip"] },
+  };
   const detail = buildDataGridRowDetail({
     rowIndex: 0,
     rowId: 1,
-    row: ['{"profile":{"city":"Shanghai"},"items":[{"id":1}]}'],
-    columns: ["document"],
-    columnIndexes: [0],
+    row: ['{"$oid":"507f1f77bcf86cd799439011"}', '{"createdAt":{"$date":"2025-01-02T03:04:05.000Z"},"labels":["vip"]}'],
+    columns: ["_id", "profile"],
+    columnIndexes: [0, 1],
     displayValue: (value) => String(value),
   });
 
-  assert.equal(
-    dataGridRowDetailJson(detail),
-    '{\n  "document": {\n    "profile": {\n      "city": "Shanghai"\n    },\n    "items": [\n      {\n        "id": 1\n      }\n    ]\n  }\n}',
-  );
+  assert.equal(dataGridRowDetailJson(detail, document), JSON.stringify(document, null, 2));
+  assert.doesNotMatch(dataGridRowDetailJson(detail, document), /\\"\\$oid\\"/);
 });
-
 test("buildDataGridColumnDetail maps a whole column across rows", () => {
   const typeByColumn = new Map([["name", "varchar"]]);
   const commentByColumn = new Map([["name", "display name"]]);
