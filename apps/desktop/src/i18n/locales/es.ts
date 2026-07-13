@@ -877,6 +877,7 @@ export default withEnglishFallback({
     nullValue: "NULL",
     noComment: "Sin comentario",
     formattedJson: "JSON formateado",
+    formatted: "Formateado",
     formattedValue: "Valor formateado",
     detailSearchPlaceholder: "Buscar campo o valor…",
     detailSearchNoMatch: "Sin coincidencias",

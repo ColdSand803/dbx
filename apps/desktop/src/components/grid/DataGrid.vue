@@ -11251,7 +11251,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       :aria-pressed="rowDetailFieldJsonViewActive(field)"
                       @click="toggleRowDetailFieldJsonView(field)"
                     >
-                      {{ rowDetailFieldJsonViewActive(field) ? t("grid.rawValue") : t("grid.formattedJson") }}
+                      {{ rowDetailFieldJsonViewActive(field) ? t("grid.rawValue") : t("grid.formatted") }}
                     </Button>
                   </div>
                 </td>

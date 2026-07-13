@@ -935,6 +935,7 @@ export default {
     emptyStringValue: "Empty string",
     noComment: "No comment",
     formattedJson: "Formatted JSON",
+    formatted: "Formatted",
     formattedValue: "Formatted Value",
     detailSearchPlaceholder: "Search field or value…",
     detailSearchNoMatch: "No matches",
