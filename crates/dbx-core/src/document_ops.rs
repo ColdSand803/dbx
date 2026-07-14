@@ -369,7 +369,10 @@ pub async fn find_documents_core(
         PoolKind::MongoDb(client) => {
             // Document browser responses must retain BSON type metadata so nested filters
             // can round-trip ObjectId, Date, and int64 values through Extended JSON.
-            mongo_driver::find_documents_extended_json(client, database, collection, skip, limit, filter, projection, sort).await
+            mongo_driver::find_documents_extended_json(
+                client, database, collection, skip, limit, filter, projection, sort,
+            )
+            .await
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();

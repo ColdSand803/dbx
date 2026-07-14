@@ -35,7 +35,7 @@ import {
   type DocumentFilterMode,
   type DocumentFilterRule,
 } from "@/lib/app/documentStoreProvider";
-import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentId, parseMongoDocumentInputValue, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -435,6 +435,8 @@ async function gridSave(changes: DocumentGridChanges) {
     const row = changes.rows[rowIdx];
     const id = row?.[idColIdx];
     if (id == null) continue;
+    const documentId = isEs ? documentIdFromGridValue(id) : mongoDocumentId(id);
+    if (!documentId) continue;
 
     if (isEs) {
       const doc = documents.value[rowIdx];
@@ -450,21 +452,23 @@ async function gridSave(changes: DocumentGridChanges) {
           updated[col] = parseMongoDocumentInputValue(newVal);
         }
       }
-      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, String(id), JSON.stringify(updated), routing);
+      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, documentId, JSON.stringify(updated), routing);
       continue;
     }
 
     const updateDoc = buildMongoUpdateDocument(dirtyCols, cols);
     if (Object.keys(updateDoc).length === 0) continue;
-    await api.documentUpdateDocument(props.connectionId, props.database, props.collection, String(id), JSON.stringify(updateDoc));
+    await api.documentUpdateDocument(props.connectionId, props.database, props.collection, documentId, JSON.stringify(updateDoc));
   }
 
   for (const rowIdx of changes.deletedRows) {
     const row = changes.rows[rowIdx];
     const id = row?.[idColIdx];
     if (id == null) continue;
+    const documentId = isEs ? documentIdFromGridValue(id) : mongoDocumentId(id);
+    if (!documentId) continue;
     const routing = isEs ? documentRoutingFromDocument(documents.value[rowIdx]) : undefined;
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, String(id), routing);
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, documentId, routing);
   }
 
   for (const newRow of changes.newRows) {
@@ -881,7 +885,12 @@ async function saveDoc() {
         error.value = "No _id field";
         return;
       }
-      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, String(id), JSON.stringify(doc), documentRoutingFromDocument(current));
+      const documentId = documentStoreProvider.value.kind === "elasticsearch" ? documentIdFromGridValue(id as MongoInputValue) : mongoDocumentId(id);
+      if (!documentId) {
+        error.value = "No _id field";
+        return;
+      }
+      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, documentId, JSON.stringify(doc), documentRoutingFromDocument(current));
     }
     isEditing.value = false;
     isNew.value = false;
@@ -899,9 +908,11 @@ async function applyDeleteDoc(idx: number) {
   const doc = documents.value[idx];
   const id = doc._id;
   if (!id) return;
+  const documentId = documentStoreProvider.value.kind === "elasticsearch" ? documentIdFromGridValue(id as MongoInputValue) : mongoDocumentId(id);
+  if (!documentId) return;
   error.value = "";
   try {
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, String(id), documentRoutingFromDocument(doc));
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, documentId, documentRoutingFromDocument(doc));
     if (selectedIdx.value === idx) {
       selectedIdx.value = null;
       editJson.value = "";

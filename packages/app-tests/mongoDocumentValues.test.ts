@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { applyMongoGridChangesToDocument, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
+import { applyMongoGridChangesToDocument, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentId, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
 
 test("parses Mongo shell ISODate literals as extended JSON dates", () => {
   assert.deepEqual(parseMongoDocumentInputValue('ISODate("2026-06-10T13:59:31.287Z")'), {
@@ -16,6 +16,13 @@ test("parses legacy Mongo date display values as UTC dates", () => {
     $date: "2025-08-14T02:25:43.718Z",
   });
   assert.equal(parseMongoDocumentInputValue('"2025-08-14 02:25:43.718"'), "2025-08-14 02:25:43.718");
+});
+
+test("extracts ObjectId values from Extended JSON for document updates and deletes", () => {
+  const oid = "507f1f77bcf86cd799439011";
+  assert.equal(mongoDocumentId({ $oid: oid }), oid);
+  assert.equal(mongoDocumentId(`{\"$oid\":\"${oid}\"}`), oid);
+  assert.equal(mongoDocumentId("customer-1"), "customer-1");
 });
 
 test("builds Mongo grid updates with set and unset operators", () => {

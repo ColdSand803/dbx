@@ -31,6 +31,17 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
   return raw;
 }
 
+export function mongoDocumentId(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const parsed = typeof value === "string" ? parseMongoDocumentInputValue(value) : value;
+  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    const oid = (parsed as Record<string, unknown>).$oid;
+    if (typeof oid === "string" && MONGO_OBJECT_ID_PATTERN.test(oid)) return oid;
+  }
+  const id = typeof parsed === "object" ? JSON.stringify(parsed) : String(parsed);
+  return id.trim() ? id : null;
+}
+
 function legacyMongoDateDisplayToExtendedJson(value: string): { $date: string } | null {
   const match = value.match(LEGACY_MONGO_DATE_DISPLAY_PATTERN);
   if (!match) return null;
