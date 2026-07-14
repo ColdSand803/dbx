@@ -2243,6 +2243,11 @@ export default withEnglishFallback({
     tableView: "テーブルビュー",
     filterPlaceholder: "フィルター...",
     sortPlaceholder: "並び替え...",
+    fieldEditor: "フィールド",
+    nativeJson: "ネイティブJSON",
+    nativeJsonHint: "BSON 値には MongoDB Extended JSON を使用してください。例: $oid、$date、$numberLong。",
+    invalidNativeJson: "ネイティブJSONの形式が無効です: {error}",
+    nativeDocumentRequired: "ネイティブJSONの最上位はドキュメントオブジェクトである必要があります。",
   },
   vector: {
     collectionFallback: "コレクション",

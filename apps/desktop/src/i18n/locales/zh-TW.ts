@@ -2099,6 +2099,11 @@ export default withEnglishFallback({
     tableView: "表格檢視",
     filterPlaceholder: "過濾條件……",
     sortPlaceholder: "排序條件……",
+    fieldEditor: "欄位",
+    nativeJson: "原生 JSON",
+    nativeJsonHint: "BSON 值請使用 MongoDB Extended JSON，例如 $oid、$date、$numberLong。",
+    invalidNativeJson: "原生 JSON 格式無效：{error}",
+    nativeDocumentRequired: "原生 JSON 的最上層必須是文件物件。",
   },
   vector: {
     collectionFallback: "集合",
