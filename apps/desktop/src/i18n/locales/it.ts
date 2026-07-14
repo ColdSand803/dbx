@@ -2242,6 +2242,11 @@ export default withEnglishFallback({
     tableView: "Visualizzazione Tabella",
     filterPlaceholder: "Filtra...",
     sortPlaceholder: "Ordina...",
+    fieldEditor: "campo",
+    nativeJson: "JSON nativo",
+    nativeJsonHint: "Per i valori BSON, utilizzare MongoDB Extended JSON, ad esempio $oid, $date, $numberLong.",
+    invalidNativeJson: "Formato JSON nativo non valido: {error}",
+    nativeDocumentRequired: "Il livello superiore del JSON nativo deve essere un oggetto documento.",
   },
   vector: {
     collectionFallback: "collezione",
