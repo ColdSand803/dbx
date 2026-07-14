@@ -7,6 +7,7 @@ import {
   buildMongoInsertDocument,
   buildMongoUpdateDocument,
   formatMongoShellLiteral,
+  mongoDocumentDisplayValue,
   mongoDocumentIdForGrid,
   parseMongoDocumentInputValue,
   serializeMongoDocumentId,
@@ -240,4 +241,24 @@ test("serializes typed Mongo document ids while keeping their grid display compa
 
 test("formats extended JSON int64 values as Mongo shell NumberLong literals", () => {
   assert.equal(formatMongoShellLiteral({ snowflake: { $numberLong: "9007199254740993" } }), '{"snowflake":NumberLong("9007199254740993")}');
+});
+
+test("keeps normal Mongo values readable and unsafe Int64 editable", () => {
+  assert.equal(mongoDocumentDisplayValue(42), 42);
+  assert.equal(mongoDocumentDisplayValue(3.5), 3.5);
+  assert.equal(mongoDocumentDisplayValue('ISODate("2026-07-14T00:00:00Z")'), 'ISODate("2026-07-14T00:00:00Z")');
+  assert.equal(mongoDocumentDisplayValue({ $numberLong: "9007199254740993" }), 'NumberLong("9007199254740993")');
+  assert.deepEqual(parseMongoDocumentInputValue('NumberLong("9007199254740993")'), { $numberLong: "9007199254740993" });
+});
+
+test("builds edits for Int32, Double, Date, and unsafe Int64", () => {
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, 42],
+    [2, 3.5],
+    [3, 'ISODate("2026-07-14T00:00:00Z")'],
+    [4, 'NumberLong("9007199254740993")'],
+  ]);
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "int32", "double", "createdAt", "unsafe"]), {
+    $set: { int32: 42, double: 3.5, createdAt: { $date: "2026-07-14T00:00:00Z" }, unsafe: { $numberLong: "9007199254740993" } },
+  });
 });
