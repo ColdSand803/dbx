@@ -35,7 +35,7 @@ import {
   type DocumentFilterMode,
   type DocumentFilterRule,
 } from "@/lib/app/documentStoreProvider";
-import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentId, parseMongoDocumentInputValue, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentDisplayValue, mongoDocumentId, parseMongoDocumentInputValue, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -194,7 +194,7 @@ const gridResult = computed<QueryResult>(() => {
 
   const rows = docs.map((doc) =>
     columns.map((col) => {
-      const val = doc[col];
+      const val = mongoDocumentDisplayValue(doc[col]);
       if (val === undefined || val === null) return null;
       if (typeof val === "object") return JSON.stringify(val);
       if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") return val;
@@ -801,6 +801,7 @@ function requestRemoveField(idx: number) {
 }
 
 function formatForEdit(value: unknown): string {
+  value = mongoDocumentDisplayValue(value);
   if (value === undefined) return "";
   if (value === null) return "null";
   if (typeof value === "string") return JSON.stringify(value);

@@ -592,10 +592,11 @@ pub async fn find_documents(
     Ok(MongoDocumentResult { documents, total })
 }
 
-/// Find MongoDB documents as canonical Extended JSON for MongoDB transfer paths.
+/// Find MongoDB documents in the browser representation.
 ///
-/// Canonical Extended JSON preserves BSON types that JSON cannot represent
-/// safely, including Int64 values outside JavaScript's safe integer range.
+/// Most BSON values use their readable JSON representation. ObjectIds retain
+/// their Extended JSON wrapper and only Int64 values outside JavaScript's safe
+/// integer range use `$numberLong`, so their type and exact value can round-trip.
 #[allow(clippy::too_many_arguments)]
 pub async fn find_documents_extended_json(
     client: &Client,
@@ -645,7 +646,7 @@ pub async fn find_documents_extended_json(
     let mut documents = Vec::new();
     while cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(Bson::Document(doc).into_canonical_extjson());
+        documents.push(bson_to_browser_json(&Bson::Document(doc)));
     }
 
     Ok(MongoDocumentResult { documents, total })
@@ -1020,6 +1021,25 @@ fn bson_to_json(bson: &Bson) -> serde_json::Value {
     }
 }
 
+fn bson_to_browser_json(bson: &Bson) -> serde_json::Value {
+    match bson {
+        Bson::Int64(value) if !is_js_safe_integer(*value) => {
+            serde_json::json!({ "$numberLong": value.to_string() })
+        }
+        Bson::ObjectId(oid) => serde_json::json!({ "$oid": oid.to_hex() }),
+        Bson::Array(values) => serde_json::Value::Array(values.iter().map(bson_to_browser_json).collect()),
+        Bson::Document(document) => serde_json::Value::Object(
+            document.iter().map(|(key, value)| (key.clone(), bson_to_browser_json(value))).collect(),
+        ),
+        _ => bson_to_json(bson),
+    }
+}
+
+fn is_js_safe_integer(value: i64) -> bool {
+    const JS_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+    (-JS_MAX_SAFE_INTEGER..=JS_MAX_SAFE_INTEGER).contains(&value)
+}
+
 /// Convert a `serde_json::Value` (JSON object) to a BSON `Document`,
 /// handling MongoDB extended JSON conventions such as `{"$oid":"..."}`.
 pub fn json_object_to_document(value: &serde_json::Value) -> Result<Document, String> {
@@ -1064,7 +1084,13 @@ fn json_object_to_document_for_update(
     value: &serde_json::Value,
     existing: Option<&Document>,
 ) -> Result<Document, String> {
-    if contains_extended_json_wrapper(value) {
+    // Browser documents intentionally keep dates readable as ISODate strings.
+    // On replacement, use the stored document to retain those BSON DateTime
+    // values while the lightweight $oid/$numberLong wrappers are decoded by
+    // json_value_to_bson when they are changed.
+    if existing.is_some() {
+        json_object_to_document_preserving_existing(value, existing)
+    } else if contains_extended_json_wrapper(value) {
         json_object_to_document_extended_json(value)
     } else {
         json_object_to_document_preserving_existing(value, existing)
@@ -1168,6 +1194,11 @@ fn json_value_to_bson(value: &serde_json::Value) -> Bson {
                 if let Some(date) = parse_extended_json_date(obj) {
                     return Bson::DateTime(date);
                 }
+                if let Some(serde_json::Value::String(value)) = obj.get("$numberLong") {
+                    if let Ok(value) = value.parse::<i64>() {
+                        return Bson::Int64(value);
+                    }
+                }
             }
             let doc: Document = obj.iter().map(|(k, v)| (k.clone(), json_value_to_bson(v))).collect();
             Bson::Document(doc)
@@ -1254,6 +1285,11 @@ fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>
                 // and { field: {"$gte": {"$date": ...}} } silently matches nothing.
                 if let Some(date) = parse_extended_json_date(obj) {
                     return Bson::DateTime(date);
+                }
+                if let Some(serde_json::Value::String(value)) = obj.get("$numberLong") {
+                    if let Ok(value) = value.parse::<i64>() {
+                        return Bson::Int64(value);
+                    }
                 }
             }
 
@@ -1504,6 +1540,61 @@ mod tests {
         let value = bson_to_json(&Bson::ObjectId(oid));
 
         assert_eq!(value, serde_json::json!("507f1f77bcf86cd799439011"));
+    }
+
+    #[test]
+    fn browser_json_keeps_normal_scalars_readable_and_unsafe_int64_typed() {
+        let date = DateTime::parse_rfc3339_str("2026-06-10T13:59:31.287Z").unwrap();
+        let value = bson_to_browser_json(&Bson::Document(doc! {
+            "int32": Bson::Int32(42),
+            "double": Bson::Double(3.5),
+            "date": Bson::DateTime(date),
+            "unsafe": Bson::Int64(2_326_645_729_978_441_729),
+        }));
+
+        assert_eq!(value["int32"], serde_json::json!(42));
+        assert_eq!(value["double"], serde_json::json!(3.5));
+        assert_eq!(value["date"], serde_json::json!("ISODate(\"2026-06-10T13:59:31.287Z\")"));
+        assert_eq!(value["unsafe"], serde_json::json!({ "$numberLong": "2326645729978441729" }));
+    }
+
+    #[test]
+    fn browser_json_round_trips_normal_scalars_and_unsafe_int64_on_edit() {
+        let date = DateTime::parse_rfc3339_str("2026-06-10T13:59:31.287Z").unwrap();
+        let existing = doc! {
+            "name": "before",
+            "int32": Bson::Int32(42),
+            "double": Bson::Double(3.5),
+            "date": Bson::DateTime(date),
+            "unsafe": Bson::Int64(2_326_645_729_978_441_729),
+        };
+        let mut edited = bson_to_browser_json(&Bson::Document(existing.clone()));
+        edited["name"] = serde_json::json!("after");
+        let round_tripped = json_object_to_document_for_update(&edited, Some(&existing)).unwrap();
+
+        assert_eq!(round_tripped.get_str("name").unwrap(), "after");
+        assert!(matches!(round_tripped.get("int32"), Some(Bson::Int32(42))));
+        assert!(matches!(round_tripped.get("double"), Some(Bson::Double(value)) if *value == 3.5));
+        assert!(matches!(round_tripped.get("date"), Some(Bson::DateTime(value)) if *value == date));
+        assert!(matches!(round_tripped.get("unsafe"), Some(Bson::Int64(2_326_645_729_978_441_729))));
+    }
+
+    #[test]
+    fn browser_json_filters_decode_normal_scalars_and_unsafe_int64() {
+        let filter = serde_json::json!({
+            "int32": 42,
+            "double": 3.5,
+            "date": "ISODate(\"2026-06-10T13:59:31.287Z\")",
+            "unsafe": { "$numberLong": "2326645729978441729" },
+        });
+        let document = json_filter_to_document(&filter).unwrap();
+
+        assert!(matches!(document.get("int32"), Some(Bson::Int64(42))));
+        assert!(matches!(document.get("double"), Some(Bson::Double(value)) if *value == 3.5));
+        assert!(
+            matches!(document.get("date"), Some(Bson::DateTime(value)) if value.timestamp_millis() == 1_781_107_171_287)
+        );
+        assert!(matches!(document.get("unsafe"), Some(Bson::Int64(2_326_645_729_978_441_729))));
     }
 
     #[test]

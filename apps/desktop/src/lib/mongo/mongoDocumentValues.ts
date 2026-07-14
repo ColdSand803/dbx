@@ -1,6 +1,7 @@
 export type MongoInputValue = string | number | boolean | null;
 
 const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
+const MONGO_SHELL_NUMBER_LONG_PATTERN = /^NumberLong\(\s*(["'])(-?\d+)\1\s*\)$/;
 const LEGACY_MONGO_DATE_DISPLAY_PATTERN = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?$/;
 const MONGO_OBJECT_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
 
@@ -21,6 +22,9 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
   const shellDate = mongoShellDateToExtendedJson(trimmed);
   if (shellDate !== trimmed) return shellDate;
 
+  const shellNumberLong = mongoShellNumberLongToExtendedJson(trimmed);
+  if (shellNumberLong !== trimmed) return shellNumberLong;
+
   const legacyDate = legacyMongoDateDisplayToExtendedJson(trimmed);
   if (legacyDate) return legacyDate;
 
@@ -29,6 +33,21 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
     return mongoShellDateToExtendedJson(JSON.parse(trimmed));
   }
   return raw;
+}
+
+/**
+ * Formats the one browser-only BSON wrapper as an editable shell literal.
+ * Keeping it out of JSON.stringify prevents an unsafe Int64 from becoming a
+ * rounded JavaScript number when a grid cell is saved unchanged.
+ */
+export function mongoDocumentDisplayValue(value: unknown): unknown {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const object = value as Record<string, unknown>;
+    if (Object.keys(object).length === 1 && typeof object.$numberLong === "string") {
+      return `NumberLong(${JSON.stringify(object.$numberLong)})`;
+    }
+  }
+  return value;
 }
 
 export function mongoDocumentId(value: unknown): string | null {
@@ -47,6 +66,11 @@ function legacyMongoDateDisplayToExtendedJson(value: string): { $date: string } 
   if (!match) return null;
   const [, date, time, millis = "000"] = match;
   return { $date: `${date}T${time}.${millis.padEnd(3, "0")}Z` };
+}
+
+function mongoShellNumberLongToExtendedJson(value: string): unknown {
+  const match = value.match(MONGO_SHELL_NUMBER_LONG_PATTERN);
+  return match ? { $numberLong: match[2] } : value;
 }
 
 export function buildMongoUpdateDocument(changes: Map<number, MongoInputValue>, columns: string[]): Record<string, unknown> {

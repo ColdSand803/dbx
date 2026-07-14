@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { applyMongoGridChangesToDocument, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentId, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
+import { applyMongoGridChangesToDocument, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentDisplayValue, mongoDocumentId, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
 
 test("parses Mongo shell ISODate literals as extended JSON dates", () => {
   assert.deepEqual(parseMongoDocumentInputValue('ISODate("2026-06-10T13:59:31.287Z")'), {
@@ -112,4 +112,30 @@ test("formats extended JSON object ids as Mongo shell ObjectId literals", () => 
 
 test("formats extended JSON int64 values as Mongo shell NumberLong literals", () => {
   assert.equal(formatMongoShellLiteral({ snowflake: { $numberLong: "9007199254740993" } }), '{"snowflake":NumberLong("9007199254740993")}');
+});
+
+test("keeps ordinary Mongo values readable while making unsafe Int64 editable", () => {
+  assert.equal(mongoDocumentDisplayValue(42), 42);
+  assert.equal(mongoDocumentDisplayValue(1.5), 1.5);
+  assert.equal(mongoDocumentDisplayValue('ISODate("2026-07-14T00:00:00Z")'), 'ISODate("2026-07-14T00:00:00Z")');
+  assert.equal(mongoDocumentDisplayValue({ $numberLong: "9007199254740993" }), 'NumberLong("9007199254740993")');
+  assert.deepEqual(parseMongoDocumentInputValue('NumberLong("9007199254740993")'), { $numberLong: "9007199254740993" });
+});
+
+test("builds editable Int32, Double, Date, and unsafe Int64 Mongo values without changing their representation", () => {
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, 42],
+    [2, 1.5],
+    [3, 'ISODate("2026-07-14T00:00:00Z")'],
+    [4, 'NumberLong("9007199254740993")'],
+  ]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "int32", "double", "createdAt", "snowflake"]), {
+    $set: {
+      int32: 42,
+      double: 1.5,
+      createdAt: { $date: "2026-07-14T00:00:00Z" },
+      snowflake: { $numberLong: "9007199254740993" },
+    },
+  });
 });
