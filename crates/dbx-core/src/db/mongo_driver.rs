@@ -617,7 +617,10 @@ pub async fn count_documents(
     }
 }
 
-/// Find MongoDB documents as relaxed Extended JSON for MongoDB transfer paths.
+/// Find MongoDB documents as canonical Extended JSON for MongoDB transfer paths.
+///
+/// Canonical Extended JSON preserves BSON types that JSON cannot represent
+/// safely, including Int64 values outside JavaScript's safe integer range.
 #[allow(clippy::too_many_arguments)]
 pub async fn find_documents_extended_json(
     client: &Client,
@@ -667,7 +670,7 @@ pub async fn find_documents_extended_json(
     let mut documents = Vec::new();
     while cursor.advance().await.map_err(|e| e.to_string())? {
         let doc = cursor.deserialize_current().map_err(|e| e.to_string())?;
-        documents.push(Bson::Document(doc).into_relaxed_extjson());
+        documents.push(Bson::Document(doc).into_canonical_extjson());
     }
 
     Ok(MongoDocumentResult { documents, total })
@@ -1614,7 +1617,7 @@ mod tests {
     }
 
     #[test]
-    fn bson_to_extended_json_preserves_nested_object_ids() {
+    fn canonical_extended_json_preserves_nested_object_ids() {
         let oid = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
         let nested_oid = ObjectId::parse_str("507f191e810c19729de860ea").unwrap();
         let value = Bson::Document(doc! {
@@ -1622,7 +1625,7 @@ mod tests {
             "owner": { "id": Bson::ObjectId(nested_oid) },
             "tags": [Bson::ObjectId(nested_oid)],
         })
-        .into_relaxed_extjson();
+        .into_canonical_extjson();
 
         assert_eq!(
             value,
@@ -1632,6 +1635,19 @@ mod tests {
                 "tags": [{ "$oid": "507f191e810c19729de860ea" }],
             })
         );
+    }
+
+    #[test]
+    fn canonical_extended_json_round_trips_unsafe_int64() {
+        let original = doc! {
+            "counter": Bson::Int64(2_326_645_729_978_441_729),
+        };
+        let extended_json = Bson::Document(original.clone()).into_canonical_extjson();
+
+        assert_eq!(extended_json, serde_json::json!({ "counter": { "$numberLong": "2326645729978441729" } }));
+
+        let round_tripped = json_object_to_document_extended_json(&extended_json).unwrap();
+        assert_eq!(round_tripped, original);
     }
 
     #[test]

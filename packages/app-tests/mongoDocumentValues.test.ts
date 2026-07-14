@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { applyMongoGridChangesToDocument, buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
+import {
+  applyMongoGridChangesToDocument,
+  buildMongoCopyDocumentFromOriginal,
+  buildMongoCopyInsertDocument,
+  buildMongoInsertDocument,
+  buildMongoUpdateDocument,
+  formatMongoShellLiteral,
+  mongoDocumentIdForGrid,
+  parseMongoDocumentInputValue,
+  serializeMongoDocumentId,
+} from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
 
 test("parses Mongo shell ISODate literals as extended JSON dates", () => {
   assert.deepEqual(parseMongoDocumentInputValue('ISODate("2026-06-10T13:59:31.287Z")'), {
@@ -187,26 +197,20 @@ test("projects original Mongo values without guessing types", () => {
     hidden: "not selected",
   };
 
-  assert.deepEqual(
-    buildMongoCopyDocumentFromOriginal(original, ["ignored", "ignored", "ignored", "ignored", "ignored"], ["numericText", "booleanText", "jsonText", "dateText", "profile"], [false, false, false, false, false]),
-    {
-      numericText: "123",
-      booleanText: "true",
-      jsonText: '{"kind":"literal"}',
-      dateText: "2024-01-01 00:00:00",
-      profile: { role: "admin" },
-    },
-  );
+  assert.deepEqual(buildMongoCopyDocumentFromOriginal(original, ["ignored", "ignored", "ignored", "ignored", "ignored"], ["numericText", "booleanText", "jsonText", "dateText", "profile"], [false, false, false, false, false]), {
+    numericText: "123",
+    booleanText: "true",
+    jsonText: '{"kind":"literal"}',
+    dateText: "2024-01-01 00:00:00",
+    profile: { role: "admin" },
+  });
 });
 
 test("applies only explicit Mongo grid edits to copied original documents", () => {
-  assert.deepEqual(
-    buildMongoCopyDocumentFromOriginal({ _id: "1", count: "123", profile: { role: "admin" } }, ["1", "456", '{"role":"maintainer"}'], ["_id", "count", "profile"], [false, true, false], { excludePrimaryKeys: true }),
-    {
-      count: 456,
-      profile: { role: "admin" },
-    },
-  );
+  assert.deepEqual(buildMongoCopyDocumentFromOriginal({ _id: "1", count: "123", profile: { role: "admin" } }, ["1", "456", '{"role":"maintainer"}'], ["_id", "count", "profile"], [false, true, false], { excludePrimaryKeys: true }), {
+    count: 456,
+    profile: { role: "admin" },
+  });
 });
 
 test("formats extended JSON dates as Mongo shell ISODate literals", () => {
@@ -226,7 +230,9 @@ test("formats extended JSON object ids as Mongo shell ObjectId literals", () => 
 
 test("serializes typed Mongo document ids while keeping their grid display compact", () => {
   const id = { $numberLong: "2048938405781032962" };
+  const objectId = { $oid: "507f1f77bcf86cd799439011" };
   assert.equal(serializeMongoDocumentId(id), '{"$numberLong":"2048938405781032962"}');
+  assert.equal(serializeMongoDocumentId(objectId), '{"$oid":"507f1f77bcf86cd799439011"}');
   assert.equal(mongoDocumentIdForGrid(id), "2048938405781032962");
   assert.equal(serializeMongoDocumentId("2048938405781032962"), '__dbx_mongo_string_id__"2048938405781032962"');
   assert.equal(serializeMongoDocumentId('{"$numberLong":"2048938405781032962"}'), '__dbx_mongo_string_id__"{\\"$numberLong\\":\\"2048938405781032962\\"}"');

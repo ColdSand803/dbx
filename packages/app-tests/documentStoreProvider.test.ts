@@ -57,14 +57,20 @@ test("builds reusable document filter conditions", () => {
 });
 
 test("preserves Extended JSON types for MongoDB structured filters", () => {
-  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "profile.ownerId", rawValue: "507f1f77bcf86cd799439011" }), {
-    kind: "mongodb",
-    sampleValue: { $oid: "507f1f77bcf86cd799439011" },
-  }), { "profile.ownerId": { $oid: "507f1f77bcf86cd799439011" } });
-  assert.deepEqual(buildDocumentFilterCondition(rule({ fieldName: "profile.createdAt", rawValue: "2026-07-13T00:00:00Z" }), {
-    kind: "mongodb",
-    sampleValue: { $date: "2025-01-01T00:00:00Z" },
-  }), { "profile.createdAt": { $date: "2026-07-13T00:00:00Z" } });
+  assert.deepEqual(
+    buildDocumentFilterCondition(rule({ fieldName: "profile.ownerId", rawValue: "507f1f77bcf86cd799439011" }), {
+      kind: "mongodb",
+      sampleValue: { $oid: "507f1f77bcf86cd799439011" },
+    }),
+    { "profile.ownerId": { $oid: "507f1f77bcf86cd799439011" } },
+  );
+  assert.deepEqual(
+    buildDocumentFilterCondition(rule({ fieldName: "profile.createdAt", rawValue: "2026-07-13T00:00:00Z" }), {
+      kind: "mongodb",
+      sampleValue: { $date: "2025-01-01T00:00:00Z" },
+    }),
+    { "profile.createdAt": { $date: "2026-07-13T00:00:00Z" } },
+  );
 });
 
 test("extracts nested document field paths for structured filters", () => {
@@ -75,6 +81,29 @@ test("extracts nested document field paths for structured filters", () => {
     ]),
     ["_id", "profile", "profile.city", "profile.address", "profile.address.zip", "tags", "status", "audit", "audit.by"],
   );
+});
+
+test("treats BSON Extended JSON wrappers as scalar document fields", () => {
+  const tree = documentFieldPathTreeFromDocuments([
+    {
+      _id: { $oid: "507f1f77bcf86cd799439011" },
+      ownerId: { $oid: "507f1f77bcf86cd799439012" },
+      createdAt: { $date: { $numberLong: "1752364800000" } },
+      sequence: { $numberLong: "9007199254740993" },
+      encoded: { $binary: { base64: "AQID", subType: "00" }, $type: "00" },
+      profile: { name: "Ada" },
+    },
+  ]);
+  const flattened = flattenDocumentFieldPathTree(tree);
+
+  assert.deepEqual(
+    flattened.map((node) => node.path),
+    ["_id", "ownerId", "createdAt", "sequence", "encoded", "profile", "profile.name"],
+  );
+  assert.equal(flattened.find((node) => node.path === "ownerId")?.kind, "scalar");
+  assert.equal(flattened.find((node) => node.path === "createdAt")?.kind, "scalar");
+  assert.equal(flattened.find((node) => node.path === "sequence")?.kind, "scalar");
+  assert.equal(flattened.find((node) => node.path === "encoded")?.kind, "scalar");
 });
 
 test("builds hierarchical document field path tree for array objects", () => {
@@ -100,8 +129,14 @@ test("builds hierarchical document field path tree for array objects", () => {
 
 test("searches nested document field paths", () => {
   const tree = documentFieldPathTreeFromDocuments([{ profile: { address: { zip: 200000 }, city: "Shanghai" }, orders: [{ sku: "A" }] }]);
-  assert.deepEqual(searchDocumentFieldPathTree(tree, "address").map((node) => node.path), ["profile.address", "profile.address.zip"]);
-  assert.deepEqual(searchDocumentFieldPathTree(tree, "orders[] > sku").map((node) => node.path), ["orders.sku"]);
+  assert.deepEqual(
+    searchDocumentFieldPathTree(tree, "address").map((node) => node.path),
+    ["profile.address", "profile.address.zip"],
+  );
+  assert.deepEqual(
+    searchDocumentFieldPathTree(tree, "orders[] > sku").map((node) => node.path),
+    ["orders.sku"],
+  );
 });
 
 test("uses elemMatch only for AND conditions on the same array object", () => {
@@ -122,7 +157,7 @@ test("uses elemMatch only for AND conditions on the same array object", () => {
 });
 
 test("formats document query object input", () => {
-  assert.equal(formatDocumentQueryInput('{profile:{city:"上海"},status:"active"}', "mongodb"), ['{', '  "profile": {', '    "city": "上海"', '  },', '  "status": "active"', '}'].join("\n"));
+  assert.equal(formatDocumentQueryInput('{profile:{city:"上海"},status:"active"}', "mongodb"), ["{", '  "profile": {', '    "city": "上海"', "  },", '  "status": "active"', "}"].join("\n"));
 });
 test("preserves MongoDB int64 document filter values", () => {
   const id = "2048938405781032962";

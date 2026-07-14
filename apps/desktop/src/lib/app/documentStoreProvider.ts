@@ -171,6 +171,7 @@ function collectDocumentFieldPathNode(nodes: DocumentFieldPathAccumulatorNode[],
   const node = ensureDocumentFieldPathNode(nodes, byKey, key, path, documentFieldPathKindFromValue(value));
   if (node.sampleValue === undefined) node.sampleValue = value;
   if (depth >= 6) return;
+  if (isBsonExtendedJsonWrapper(value)) return;
   if (Array.isArray(value)) {
     collectArrayDocumentFieldPathNodes(node, value, depth + 1);
     return;
@@ -211,9 +212,20 @@ function ensureDocumentFieldPathNode(nodes: DocumentFieldPathAccumulatorNode[], 
 }
 
 function documentFieldPathKindFromValue(value: unknown): DocumentFieldPathKind {
+  if (isBsonExtendedJsonWrapper(value)) return "scalar";
   if (Array.isArray(value)) return arrayContainsPlainRecord(value) ? "array-object" : "array";
   if (isPlainRecord(value)) return "object";
   return "scalar";
+}
+
+const BSON_EXTENDED_JSON_SINGLE_KEY_WRAPPERS = new Set(["$oid", "$numberInt", "$numberLong", "$numberDouble", "$numberDecimal", "$date", "$timestamp", "$binary", "$regularExpression", "$code", "$symbol", "$undefined", "$minKey", "$maxKey", "$dbPointer"]);
+
+function isBsonExtendedJsonWrapper(value: unknown): value is Record<string, unknown> {
+  if (!isPlainRecord(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length === 0) return false;
+  if (keys.length === 1) return BSON_EXTENDED_JSON_SINGLE_KEY_WRAPPERS.has(keys[0]);
+  return (keys.length === 2 && keys.includes("$binary") && keys.includes("$type")) || (keys.length === 2 && keys.includes("$code") && keys.includes("$scope")) || (keys.length === 2 && keys.includes("$dbPointer") && keys.includes("$ref"));
 }
 
 function arrayContainsPlainRecord(values: readonly unknown[]): boolean {
