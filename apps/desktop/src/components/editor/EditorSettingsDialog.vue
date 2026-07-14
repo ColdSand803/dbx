@@ -104,6 +104,7 @@ import { APP_THEME_PALETTES, type AppThemeAppearance, type AppThemeMode, type Ap
 import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { currentLocale, setLocale, type Locale } from "@/i18n";
 import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
 import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields } from "@/lib/webdav/webdavAutoUploadConfig";
@@ -116,6 +117,7 @@ const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
+const tunnelProfileStore = useTunnelProfileStore();
 const { isDark, themeMode, themePalette, setThemeMode, setThemePalette } = useTheme();
 
 const appThemePaletteOptions = computed(
@@ -1583,6 +1585,9 @@ async function downloadSnippetSnapshot() {
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
     await savedSqlStore.initFromStorage();
+    // Snapshot downloads replace backend-managed tunnel profiles, so refresh
+    // the already-loaded Pinia store instead of leaving the UI stale.
+    await tunnelProfileStore.refresh();
     let message = t("settings.syncSnippetDownloadSuccess", { bytes: result.summary.bytes, id: result.summary.snippetId });
     if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsSkipped")}`;
     if (result.applySummary.secretsApplied) message += ` ${t("settings.syncSecretsApplied")}`;
@@ -1719,6 +1724,8 @@ async function downloadWebDavSnapshot() {
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
     await savedSqlStore.initFromStorage();
+    // Keep the shared tunnel profile UI consistent with the downloaded snapshot.
+    await tunnelProfileStore.refresh();
     const message = t("settings.syncDownloadSuccess", {
       bytes: result.summary.bytes,
       path: result.summary.remotePath,

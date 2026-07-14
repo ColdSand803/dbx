@@ -50,6 +50,8 @@ import {
   Clipboard,
   Check,
   UsersRound,
+  Activity,
+  Gauge,
   CalendarClock,
   Lock,
   HardDriveDownload,
@@ -72,7 +74,7 @@ import type { ColumnInfo, ConnectionConfig, DatabaseType, ObjectSourceKind, Tree
 import * as api from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
-import { canTreeNodePin, canTreeNodeShowExpander, treeItemPaddingLeft, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { canTreeNodePin, canTreeNodeShowExpander, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { connectionFilePath, defaultSqliteBackupFileName, isMemorySqlitePath, sqliteBackupSourcePath } from "@/lib/connection/connectionFile";
@@ -144,6 +146,8 @@ import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelToo
 import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { supportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
+import { supportsProcessList } from "@/lib/database/mysqlProcessList";
+import { connectionSupportsServerDashboard } from "@/lib/database/mysqlServerStatus";
 import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
@@ -278,7 +282,6 @@ const emit = defineEmits<{
 const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(props.node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll));
 const sidebarTreeContext = inject(sidebarTreeContextKey, null);
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
-const labelWidthClass = computed(() => (usesFullWidthLabel.value ? "shrink-0 whitespace-nowrap" : "min-w-0 truncate"));
 const nodeProductionContext = computed(() => {
   const connectionId = props.node.connectionId;
   return productionContextForDatabase(connectionId ? connectionStore.getConfig(connectionId) : undefined, props.node.database);
@@ -578,12 +581,14 @@ async function toggle() {
   const databaseObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages";
   if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
     node.isExpanded = !node.isExpanded;
+    if (wasExpanded) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
     return;
   }
 
   if (node.isExpanded) {
     node.isExpanded = false;
+    connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
     return;
   }
@@ -1152,6 +1157,30 @@ async function openUserAdmin() {
   }
 }
 
+async function openProcessList() {
+  const node = props.node;
+  if (!node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openProcessList(node.connectionId);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+  }
+}
+
+async function openMysqlDashboard() {
+  const node = props.node;
+  if (!node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openMysqlDashboard(node.connectionId);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+  }
+}
+
 async function openDamengJobAdmin() {
   const node = props.node;
   if (!node.connectionId) return;
@@ -1287,6 +1316,7 @@ async function openData() {
     tabId,
     cachedTableMeta ?? {
       catalog: node.catalog,
+      database: node.database,
       schema: tableSchema,
       tableName: node.label,
       tableType,
@@ -1394,7 +1424,9 @@ async function openData() {
     const includeRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableType);
     const sql = await buildTableSelectSql({
       databaseType: effectiveDbType,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       schema: tableSchema,
+      database: node.database,
       tableName: node.label,
       tableType,
       catalog: node.catalog,
@@ -3768,6 +3800,7 @@ async function exportDataLegacy(format: "csv" | "json" | "sql") {
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const result = await fetchTableDataForExport({
       databaseType: effectiveDbType,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
       schema: node.schema,
       tableName: node.label,
       tableType: node.tableType,
@@ -4176,6 +4209,7 @@ const tableComment = computed(() =>
     ? props.node.comment
     : null,
 );
+const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: !!columnComment.value || !!tableComment.value }));
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
 const tableSearchParentId = computed(() => props.node.tableSearchParentId || "");
 const tableSearchValue = computed(() => {
@@ -4692,6 +4726,12 @@ function treeItemMenuItems(): ContextMenuItem[] {
     if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     if (supportsDatabaseUserAdmin(currentDatabaseType())) {
       items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
+    }
+    if (supportsProcessList(currentDatabaseType())) {
+      items.push({ label: t("contextMenu.processList"), action: openProcessList, icon: Activity });
+    }
+    if (node.connectionId && connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId))) {
+      items.push({ label: t("contextMenu.serverDashboard"), action: openMysqlDashboard, icon: Gauge });
     }
     if (currentDatabaseType() === "dameng") {
       items.push({ label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });

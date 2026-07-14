@@ -31,6 +31,7 @@ import {
   isSqlLikeCompletionStatement,
   recordCompletionSelection,
   shouldAutoOpenSqlCompletion,
+  shouldChainSqlCompletionAfterAccept,
   extractCteDefinitions,
 } from "@/lib/sql/sqlCompletion";
 import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
@@ -248,8 +249,10 @@ let codeMirrorInsertNewlineKeepIndent: typeof import("@codemirror/commands").ins
 let codeMirrorToggleLineComment: typeof import("@codemirror/commands").toggleLineComment | null = null;
 let setSqlDiagnosticsEffect: import("@codemirror/state").StateEffectType<SqlSemanticDiagnostic[]> | null = null;
 let setPreviewRangeEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
+let setResultSourceRangeEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
 let previewRangeComp: import("@codemirror/state").Compartment | null = null;
 let buildPreviewRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
+let buildResultSourceRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
 let buildRunStatementGutterExtension: (() => import("@codemirror/state").Extension) | null = null;
 let indentComp: import("@codemirror/state").Compartment | null = null;
 let codeMirrorIndentUnit: typeof import("@codemirror/language").indentUnit | null = null;
@@ -487,6 +490,33 @@ function setPreviewRange(range: { from: number; to: number } | null) {
   if (!view.value || !setPreviewRangeEffect) return;
   view.value.dispatch({
     effects: setPreviewRangeEffect.of(range),
+  });
+}
+
+function setResultSourceRange(range: { from: number; to: number } | null) {
+  if (!view.value || !setResultSourceRangeEffect) return;
+  view.value.dispatch({
+    effects: setResultSourceRangeEffect.of(range),
+  });
+}
+
+function previewStatementRange(range: { from: number; to: number } | null) {
+  const currentView = view.value;
+  if (!range || !currentView || !editorViewModule || !setResultSourceRangeEffect) {
+    setResultSourceRange(null);
+    return;
+  }
+
+  const from = Math.max(0, Math.min(range.from, currentView.state.doc.length));
+  const to = Math.max(from, Math.min(range.to, currentView.state.doc.length));
+  if (from === to) {
+    setResultSourceRange(null);
+    return;
+  }
+
+  currentView.dispatch({
+    selection: { anchor: from },
+    effects: [setResultSourceRangeEffect.of({ from, to }), editorViewModule.EditorView.scrollIntoView(from, { y: "center" })],
   });
 }
 
@@ -1079,10 +1109,13 @@ function executableSqlFromView(currentView: EditorViewType): string {
 }
 
 function sqlExecutionSnapshotFromView(currentView: EditorViewType): SqlExecutionSnapshot {
+  const selection = currentView.state.selection.main;
   return {
     fullSql: currentView.state.doc.toString(),
     selectedSql: selectedSqlFromView(currentView),
-    cursorPos: currentView.state.selection.main.head,
+    cursorPos: selection.head,
+    selectionFrom: selection.from,
+    selectionTo: selection.to,
   };
 }
 
@@ -1762,8 +1795,8 @@ function isTypedCompletionActivation(explicit: boolean) {
   return explicit && typedCompletionActivationUntil >= Date.now();
 }
 
-function markCompletionAccepted() {
-  suppressNextSqlCompletionAutoStartUntil = Date.now() + 750;
+function markCompletionAccepted(item: QueryCompletionItem) {
+  suppressNextSqlCompletionAutoStartUntil = shouldChainSqlCompletionAfterAccept(item) ? 0 : Date.now() + 750;
   completionEpoch++;
 }
 
@@ -1820,7 +1853,7 @@ function completionOptionForItem(item: QueryCompletionItem) {
       ...completion,
       apply(view: EditorViewType, completionItem: unknown, from: number, to: number) {
         record();
-        markCompletionAccepted();
+        markCompletionAccepted(item);
         if (typeof originalApply === "function") {
           originalApply(view, completionItem as never, from, to);
         } else {
@@ -1841,7 +1874,7 @@ function completionOptionForItem(item: QueryCompletionItem) {
     boost: item.boost,
     apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
       record();
-      markCompletionAccepted();
+      markCompletionAccepted(item);
       const insert = item.apply ?? item.label;
       if (codeMirrorInsertCompletionText) {
         view.dispatch(codeMirrorInsertCompletionText(view.state, insert, from, to));
@@ -2573,8 +2606,8 @@ onMounted(async () => {
   if (!editorRef.value) return;
 
   const [
-    { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, Decoration, tooltips, gutter, GutterMarker, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
-    { EditorState, EditorSelection, Compartment, Prec, StateEffect, StateField },
+    { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, Decoration, tooltips, gutter, GutterMarker, lineNumberMarkers, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
+    { EditorState, EditorSelection, Compartment, Prec, RangeSet, StateEffect, StateField },
     langSql,
     { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, toggleLineComment, history, defaultKeymap, historyKeymap },
@@ -2680,9 +2713,45 @@ onMounted(async () => {
             return Decoration.set([Decoration.mark({ class: "cm-db-execution-preview" }).range(range.from, range.to)]);
           }
         }
+        if (transaction.docChanged || transaction.selection) return Decoration.none;
         return decorations;
       },
       provide: (f) => EditorView.decorations.from(f),
+    });
+    return field;
+  };
+
+  class ResultSourceLineNumberMarker extends GutterMarker {
+    elementClass = "cm-db-result-source-line-number";
+  }
+
+  const resultSourceLineNumberMarker = new ResultSourceLineNumberMarker();
+  setResultSourceRangeEffect = StateEffect.define<{ from: number; to: number } | null>();
+  buildResultSourceRangeExtension = () => {
+    const effectType = setResultSourceRangeEffect!;
+    const markersForRange = (state: import("@codemirror/state").EditorState, range: { from: number; to: number }) => {
+      const from = Math.max(0, Math.min(range.from, state.doc.length));
+      const to = Math.max(from, Math.min(range.to, state.doc.length));
+      const startLine = state.doc.lineAt(from);
+      const endLine = state.doc.lineAt(Math.max(from, to - 1));
+      const markers = Array.from({ length: endLine.number - startLine.number + 1 }, (_, index) => resultSourceLineNumberMarker.range(state.doc.line(startLine.number + index).from));
+      return RangeSet.of(markers);
+    };
+
+    const field = StateField.define({
+      create() {
+        return RangeSet.empty;
+      },
+      update(markers, transaction) {
+        for (const effect of transaction.effects) {
+          if (effect.is(effectType)) {
+            return effect.value ? markersForRange(transaction.state, effect.value) : RangeSet.empty;
+          }
+        }
+        if (transaction.docChanged || transaction.selection) return RangeSet.empty;
+        return markers;
+      },
+      provide: (field) => lineNumberMarkers.from(field),
     });
     return field;
   };
@@ -2877,6 +2946,7 @@ onMounted(async () => {
         requestTableColumns: requestInsertValueHintTableColumns,
       }),
       previewRangeComp.of(buildPreviewRangeExtension()),
+      buildResultSourceRangeExtension(),
       Prec.highest(
         keymap.of([
           { key: "'", run: handleSqlSingleQuote },
@@ -3461,7 +3531,7 @@ function scrollCursorIntoView() {
   });
 }
 
-defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute, pasteClipboardAsSqlInCondition });
+defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute, pasteClipboardAsSqlInCondition, previewStatementRange });
 </script>
 
 <template>
@@ -3492,6 +3562,15 @@ defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute, pa
 
 :deep(.cm-db-execution-preview) {
   background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35));
+}
+
+:deep(.cm-lineNumbers .cm-db-result-source-line-number) {
+  color: rgb(126 34 206) !important;
+  font-weight: 700;
+}
+
+:global(.dark) :deep(.cm-lineNumbers .cm-db-result-source-line-number) {
+  color: rgb(216 180 254) !important;
 }
 
 :deep(.cm-db-current-statement-line) {

@@ -35,7 +35,7 @@ import {
   type DocumentFilterMode,
   type DocumentFilterRule,
 } from "@/lib/app/documentStoreProvider";
-import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -165,8 +165,9 @@ const deleteDetails = computed(() => {
   if (!pending) return "";
   if (pending.kind === "document") {
     const id = documents.value[pending.index]?._id ?? "";
-    if (props.databaseType === "elasticsearch") return `Elasticsearch index: ${props.collection}\nDocument _id: ${String(id)}`;
-    return t("dangerDialog.mongoDocumentDetails", { collection: props.collection, id: String(id) });
+    const displayId = mongoDocumentIdForGrid(id);
+    if (props.databaseType === "elasticsearch") return `Elasticsearch index: ${props.collection}\nDocument _id: ${String(displayId)}`;
+    return t("dangerDialog.mongoDocumentDetails", { collection: props.collection, id: String(displayId) });
   }
   return t("dangerDialog.mongoFieldDetails", { field: pending.name || t("mongo.field") });
 });
@@ -196,6 +197,7 @@ const gridResult = computed<QueryResult>(() => {
     columns.map((col) => {
       const val = doc[col];
       if (val === undefined || val === null) return null;
+      if (col === "_id") return mongoDocumentIdForGrid(val);
       if (typeof val === "object") return JSON.stringify(val);
       if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") return val;
       return String(val);
@@ -403,6 +405,19 @@ function clearDocumentFilters(clearLocalFilter?: (columnIndex?: number) => void)
 
 function documentIdFromGridValue(value: MongoInputValue | undefined): string | null {
   if (value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith('"')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return typeof parsed === "string" && parsed.trim() ? parsed : trimmed;
+      } catch {
+        return trimmed;
+      }
+    }
+    return trimmed;
+  }
   const parsed = parseMongoDocumentInputValue(value);
   if (parsed === null || parsed === undefined) return null;
   const id = typeof parsed === "object" ? JSON.stringify(parsed) : String(parsed);
@@ -454,17 +469,20 @@ async function gridSave(changes: DocumentGridChanges) {
       continue;
     }
 
-    const updateDoc = buildMongoUpdateDocument(dirtyCols, cols);
+    const updateDoc = buildMongoUpdateDocument(dirtyCols, cols, documents.value[rowIdx]);
     if (Object.keys(updateDoc).length === 0) continue;
-    await api.documentUpdateDocument(props.connectionId, props.database, props.collection, String(id), JSON.stringify(updateDoc));
+    const documentId = documents.value[rowIdx]?._id ?? id;
+    await api.documentUpdateDocument(props.connectionId, props.database, props.collection, serializeMongoDocumentId(documentId), JSON.stringify(updateDoc));
   }
 
   for (const rowIdx of changes.deletedRows) {
     const row = changes.rows[rowIdx];
     const id = row?.[idColIdx];
     if (id == null) continue;
-    const routing = isEs ? documentRoutingFromDocument(documents.value[rowIdx]) : undefined;
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, String(id), routing);
+    const document = documents.value[rowIdx];
+    const routing = isEs ? documentRoutingFromDocument(document) : undefined;
+    const documentId = isEs ? id : (document?._id ?? id);
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, isEs ? String(documentId) : serializeMongoDocumentId(documentId), routing);
   }
 
   for (const newRow of changes.newRows) {
@@ -484,17 +502,10 @@ async function gridSave(changes: DocumentGridChanges) {
   await load();
 }
 
-function formatMongoValue(val: unknown): string {
-  if (val === null || val === undefined) return "null";
-  if (typeof val === "number" || typeof val === "boolean") return String(val);
-  if (typeof val === "string") return JSON.stringify(val);
-  return JSON.stringify(val);
-}
-
 function mongoIdPreview(val: unknown): string {
   if (val === null || val === undefined) return "null";
   if (typeof val === "string" && /^[a-fA-F0-9]{24}$/.test(val)) return `ObjectId("${val}")`;
-  return formatMongoValue(val);
+  return formatMongoShellLiteral(val);
 }
 
 function elasticsearchPathIdPreview(id: string): string {
@@ -531,8 +542,8 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
       const routing = documentRoutingFromGridRow(row, columns);
       stmts.push(`POST /${coll}/_update/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}\n${JSON.stringify({ doc: updateDoc.$set ?? updateDoc }, null, 2)}`);
     } else {
-      const updateDoc = buildMongoUpdateDocument(dirtyCols, columns);
-      stmts.push(`db.${coll}.updateOne({_id: ${mongoIdPreview(id)}}, ${formatMongoShellLiteral(updateDoc)})`);
+      const updateDoc = buildMongoUpdateDocument(dirtyCols, columns, documents.value[rowIdx]);
+      stmts.push(`db.${coll}.updateOne({_id: ${mongoIdPreview(documents.value[rowIdx]?._id ?? id)}}, ${formatMongoShellLiteral(updateDoc)})`);
     }
   }
 
@@ -544,7 +555,7 @@ async function previewDocumentChanges(changes: DocumentGridChanges): Promise<str
       const routing = documentRoutingFromGridRow(row, columns);
       stmts.push(`DELETE /${coll}/_doc/${elasticsearchPathIdPreview(String(id))}${elasticsearchRoutingPreview(routing)}`);
     } else {
-      stmts.push(`db.${coll}.deleteOne({_id: ${mongoIdPreview(id)}})`);
+      stmts.push(`db.${coll}.deleteOne({_id: ${mongoIdPreview(documents.value[rowIdx]?._id ?? id)}})`);
     }
   }
 
@@ -882,7 +893,7 @@ async function saveDoc() {
         error.value = "No _id field";
         return;
       }
-      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, String(id), JSON.stringify(doc), documentRoutingFromDocument(current));
+      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, serializeMongoDocumentId(id), JSON.stringify(doc), documentRoutingFromDocument(current));
     }
     isEditing.value = false;
     isNew.value = false;
@@ -902,7 +913,7 @@ async function applyDeleteDoc(idx: number) {
   if (!id) return;
   error.value = "";
   try {
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, String(id), documentRoutingFromDocument(doc));
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeMongoDocumentId(id), documentRoutingFromDocument(doc));
     if (selectedIdx.value === idx) {
       selectedIdx.value = null;
       editJson.value = "";
