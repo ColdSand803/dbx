@@ -103,6 +103,7 @@ import {
   usesTreeSchemaMode,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
+import { dataTabOpenModeFromTreeClick, findExistingDataTabCandidate, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
@@ -987,6 +988,15 @@ function onClick(event: MouseEvent) {
   // Row clicks must not bubble to the tree container, whose click handler
   // clears the selection when the blank area is clicked (issue #681).
   event.stopPropagation();
+  const dataTabOpenMode = dataTabOpenModeFromTreeClick(props.node.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab);
+  if (dataTabOpenMode === "new-tab") {
+    event.preventDefault();
+    if (event.detail > 1) return;
+    selectSingleTreeNode(props.node);
+    rowRef.value?.focus({ preventScroll: true });
+    openDataInNewTabImmediately(props.node);
+    return;
+  }
   if (event.shiftKey) {
     selectTreeNodeRange(props.node);
     rowRef.value?.focus({ preventScroll: true });
@@ -1190,7 +1200,8 @@ function requestDeleteSelectedNode(): boolean {
   return false;
 }
 
-function onDoubleClick() {
+function onDoubleClick(event: MouseEvent) {
+  if (dataTabOpenModeFromTreeClick(props.node.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
   const action = treeNodeRowDoubleClickAction(props.node.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value);
   if (action === "open-object-browser") {
     void openObjectBrowser();
@@ -1349,7 +1360,11 @@ function openDataImmediately(node: TreeNode = props.node) {
   emit("open-data", node, false, openData);
 }
 
-async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
+function openDataInNewTabImmediately(node: TreeNode = props.node) {
+  emit("open-data", node, false, (target, request) => openData(target, request, "new-tab"));
+}
+
+async function openData(node: TreeNode, request?: SidebarDataOpenRequest, openMode: DataTabOpenMode = "default") {
   if (!(node.type === "table" || node.type === "view" || node.type === "materialized_view") || !hasNodeDatabaseContext(node)) return;
   const config = connectionStore.getConfig(node.connectionId);
   const traceId = uuid().slice(0, 8);
@@ -1381,9 +1396,18 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
   const querySchema = config ? connectionObjectTreeQuerySchema(config, node.database, tableSchema) : (tableSchema ?? "");
   const effectiveDbType = effectiveDatabaseTypeForConnection(config);
   const metadataDatabaseType = effectiveDbType || config?.db_type || "";
-  const isSameDataTableTab = (tab: (typeof queryStore.tabs)[number]) =>
-    tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database && (tab.tableMeta?.catalog || "") === (node.catalog || "") && (tab.schema || "") === (tableSchema || "") && (tab.tableMeta?.tableName || tab.title) === node.label;
-  const existingSameTableTab = queryStore.tabs.find(isSameDataTableTab);
+  const existingDataTabCandidate = findExistingDataTabCandidate(
+    queryStore.tabs,
+    {
+      connectionId: node.connectionId,
+      database: node.database,
+      schema: tableSchema,
+      catalog: node.catalog,
+      tableName: node.label,
+    },
+    { openMode, reuseDataTab: settingsStore.editorSettings.reuseDataTab },
+  );
+  const existingSameTableTab = existingDataTabCandidate?.match === "same-table" ? existingDataTabCandidate.tab : undefined;
   const resetReusedDataTabState = (tab: (typeof queryStore.tabs)[number]) => {
     tab.title = node.label;
     tab.schema = tableSchema;
@@ -1414,18 +1438,10 @@ async function openData(node: TreeNode, request?: SidebarDataOpenRequest) {
   }
 
   const tabId = (() => {
-    if (existingSameTableTab) {
-      queryStore.switchTab(existingSameTableTab.id);
-      resetReusedDataTabState(existingSameTableTab);
-      return existingSameTableTab.id;
-    }
-    if (settingsStore.editorSettings.reuseDataTab) {
-      const existing = queryStore.tabs.find((tab) => tab.mode === "data" && tab.connectionId === node.connectionId && tab.database === node.database);
-      if (existing) {
-        queryStore.switchTab(existing.id);
-        resetReusedDataTabState(existing);
-        return existing.id;
-      }
+    if (existingDataTabCandidate) {
+      queryStore.switchTab(existingDataTabCandidate.tab.id);
+      resetReusedDataTabState(existingDataTabCandidate.tab);
+      return existingDataTabCandidate.tab.id;
     }
     return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema);
   })();
@@ -4977,6 +4993,7 @@ onBeforeUnmount(() => {
 });
 
 const shortcutCopyName = computed(() => settingsStore.editorSettings.shortcuts.copySidebarSelection);
+const shortcutOpenDataInNewTab = computed(() => settingsStore.editorSettings.shortcuts.openDataInNewTab);
 const shortcutEditConnection = computed(() => settingsStore.editorSettings.shortcuts.editSidebarConnection);
 const shortcutRename = "F2";
 const shortcutRefresh = "F5";
@@ -5423,6 +5440,12 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: openDataImmediately, icon: TableProperties });
+    items.push({
+      label: t("contextMenu.openInNewDataTab"),
+      action: openDataInNewTabImmediately,
+      icon: CopyPlus,
+      shortcut: shortcutOpenDataInNewTab.value,
+    });
     if (node.type === "table") {
       items.push({
         label: t("contextMenu.viewDdl"),
