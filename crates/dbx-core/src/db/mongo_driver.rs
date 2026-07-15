@@ -1108,64 +1108,25 @@ fn json_object_to_document_preserving_existing(
     value: &serde_json::Value,
     existing: Option<&Document>,
 ) -> Result<Document, String> {
-    match (value, existing) {
-        (serde_json::Value::Object(obj), Some(existing)) => Ok(obj
+    match value {
+        serde_json::Value::Object(obj) => obj
             .iter()
             .map(|(key, value)| {
-                let bson = existing
-                    .get(key)
-                    .map(|existing_bson| json_value_to_bson_preserving_existing(value, existing_bson))
-                    .unwrap_or_else(|| json_value_to_bson(value));
-                (key.clone(), bson)
+                json_value_to_bson_preserving_existing(value, existing.and_then(|document| document.get(key)))
+                    .map(|bson| (key.clone(), bson))
             })
-            .collect()),
+            .collect(),
         _ => json_object_to_document(value),
     }
 }
 
-/// Parse raw document-editor input without losing MongoDB Extended JSON values.
-///
-/// The document viewer returns relaxed Extended JSON, so prefer the driver's full
-/// Extended JSON decoder whenever a canonical wrapper is present. Older callers
-/// that send ordinary JSON retain the existing type-preservation behavior.
+/// Parse document-editor input value by value so mixed browser representations
+/// retain their BSON types.
 fn json_object_to_document_for_update(
     value: &serde_json::Value,
     existing: Option<&Document>,
 ) -> Result<Document, String> {
-    if contains_extended_json_wrapper(value) {
-        json_object_to_document_extended_json(value)
-    } else {
-        json_object_to_document_preserving_existing(value, existing)
-    }
-}
-
-fn contains_extended_json_wrapper(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Array(values) => values.iter().any(contains_extended_json_wrapper),
-        serde_json::Value::Object(object) => {
-            object.keys().any(|key| {
-                matches!(
-                    key.as_str(),
-                    "$oid"
-                        | "$date"
-                        | "$numberInt"
-                        | "$numberLong"
-                        | "$numberDouble"
-                        | "$numberDecimal"
-                        | "$binary"
-                        | "$regularExpression"
-                        | "$timestamp"
-                        | "$minKey"
-                        | "$maxKey"
-                        | "$undefined"
-                        | "$symbol"
-                        | "$code"
-                        | "$dbPointer"
-                )
-            }) || object.values().any(contains_extended_json_wrapper)
-        }
-        _ => false,
-    }
+    json_object_to_document_preserving_existing(value, existing)
 }
 
 pub fn json_filter_to_document(value: &serde_json::Value) -> Result<Document, String> {
@@ -1175,36 +1136,49 @@ pub fn json_filter_to_document(value: &serde_json::Value) -> Result<Document, St
     }
 }
 
-fn json_value_to_bson_preserving_existing(value: &serde_json::Value, existing: &Bson) -> Bson {
-    if &bson_to_json(existing) == value {
-        return existing.clone();
+fn json_value_to_bson_preserving_existing(value: &serde_json::Value, existing: Option<&Bson>) -> Result<Bson, String> {
+    if let Some(existing) = existing {
+        if &bson_to_json(existing) == value {
+            return Ok(existing.clone());
+        }
     }
 
-    match (value, existing) {
-        (serde_json::Value::Array(values), Bson::Array(existing_values)) => Bson::Array(
+    match value {
+        serde_json::Value::Array(values) => {
+            let existing_values = match existing {
+                Some(Bson::Array(values)) => Some(values),
+                _ => None,
+            };
             values
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
-                    existing_values
-                        .get(index)
-                        .map(|existing_item| json_value_to_bson_preserving_existing(item, existing_item))
-                        .unwrap_or_else(|| json_value_to_bson(item))
+                    json_value_to_bson_preserving_existing(item, existing_values.and_then(|values| values.get(index)))
                 })
-                .collect(),
-        ),
-        (serde_json::Value::Object(obj), Bson::Document(existing_doc)) => Bson::Document(
+                .collect::<Result<Vec<_>, _>>()
+                .map(Bson::Array)
+        }
+        serde_json::Value::Object(obj) => {
+            if let Some(value) = parse_extended_json_value(obj)? {
+                return Ok(value);
+            }
+
+            let existing_document = match existing {
+                Some(Bson::Document(document)) => Some(document),
+                _ => None,
+            };
             obj.iter()
                 .map(|(key, item)| {
-                    let bson = existing_doc
-                        .get(key)
-                        .map(|existing_item| json_value_to_bson_preserving_existing(item, existing_item))
-                        .unwrap_or_else(|| json_value_to_bson(item));
-                    (key.clone(), bson)
+                    json_value_to_bson_preserving_existing(
+                        item,
+                        existing_document.and_then(|document| document.get(key)),
+                    )
+                    .map(|bson| (key.clone(), bson))
                 })
-                .collect(),
-        ),
-        _ => json_value_to_bson(value),
+                .collect::<Result<Document, _>>()
+                .map(Bson::Document)
+        }
+        _ => Ok(json_value_to_bson(value)),
     }
 }
 
@@ -1226,24 +1200,47 @@ fn json_value_to_bson(value: &serde_json::Value) -> Bson {
         }
         serde_json::Value::Array(arr) => Bson::Array(arr.iter().map(json_value_to_bson).collect()),
         serde_json::Value::Object(obj) => {
-            // Extended JSON: {"$oid":"..."} → BSON ObjectId
-            if obj.len() == 1 {
-                if let Some(serde_json::Value::String(hex)) = obj.get("$oid") {
-                    if let Ok(oid) = ObjectId::parse_str(hex) {
-                        return Bson::ObjectId(oid);
-                    }
-                }
-                if let Some(value) = parse_extended_json_int64(obj) {
-                    return Bson::Int64(value);
-                }
-                if let Some(date) = parse_extended_json_date(obj) {
-                    return Bson::DateTime(date);
-                }
+            if let Ok(Some(value)) = parse_extended_json_value(obj) {
+                return value;
             }
             let doc: Document = obj.iter().map(|(k, v)| (k.clone(), json_value_to_bson(v))).collect();
             Bson::Document(doc)
         }
     }
+}
+
+fn parse_extended_json_value(obj: &serde_json::Map<String, serde_json::Value>) -> Result<Option<Bson>, String> {
+    let is_wrapper = match obj.len() {
+        1 => obj.keys().next().is_some_and(|key| {
+            matches!(
+                key.as_str(),
+                "$oid"
+                    | "$date"
+                    | "$numberInt"
+                    | "$numberLong"
+                    | "$numberDouble"
+                    | "$numberDecimal"
+                    | "$binary"
+                    | "$regularExpression"
+                    | "$timestamp"
+                    | "$minKey"
+                    | "$maxKey"
+                    | "$undefined"
+                    | "$symbol"
+                    | "$code"
+                    | "$dbPointer"
+                    | "$uuid"
+            )
+        }),
+        2 => obj.contains_key("$code") && obj.contains_key("$scope"),
+        _ => false,
+    };
+
+    if !is_wrapper {
+        return Ok(None);
+    }
+
+    Bson::try_from(serde_json::Value::Object(obj.clone())).map(Some).map_err(|error| error.to_string())
 }
 
 fn parse_mongo_shell_date(value: &str) -> Option<DateTime> {
@@ -1638,6 +1635,110 @@ mod tests {
         assert_eq!(value["double"], serde_json::json!(3.5));
         assert_eq!(value["date"], serde_json::json!("ISODate(\"2026-06-10T13:59:31.287Z\")"));
         assert_eq!(value["unsafe"], serde_json::json!({ "$numberLong": "2326645729978441729" }));
+    }
+
+    #[test]
+    fn browser_json_round_trips_normal_scalars_and_unsafe_int64_on_edit() {
+        let date = DateTime::parse_rfc3339_str("2026-06-10T13:59:31.287Z").unwrap();
+        let existing = doc! {
+            "name": "before",
+            "int32": Bson::Int32(42),
+            "double": Bson::Double(3.5),
+            "date": Bson::DateTime(date),
+            "unsafe": Bson::Int64(2_326_645_729_978_441_729),
+        };
+        let mut edited = bson_to_browser_json(&Bson::Document(existing.clone()));
+        edited["name"] = serde_json::json!("after");
+        let round_tripped = json_object_to_document_for_update(&edited, Some(&existing)).unwrap();
+
+        assert_eq!(round_tripped.get_str("name").unwrap(), "after");
+        assert!(matches!(round_tripped.get("int32"), Some(Bson::Int32(42))));
+        assert!(matches!(round_tripped.get("double"), Some(Bson::Double(value)) if *value == 3.5));
+        assert!(matches!(round_tripped.get("date"), Some(Bson::DateTime(value)) if *value == date));
+        assert!(matches!(round_tripped.get("unsafe"), Some(Bson::Int64(2_326_645_729_978_441_729))));
+    }
+
+    #[test]
+    fn browser_json_round_trips_mixed_bson_types_when_editing_an_unrelated_field() {
+        let object_id = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
+        let date = DateTime::parse_rfc3339_str("2026-06-10T13:59:31.287Z").unwrap();
+        let existing = doc! {
+            "_id": Bson::ObjectId(object_id),
+            "name": "before",
+            "date": Bson::DateTime(date),
+            "unsafe": Bson::Int64(2_326_645_729_978_441_729),
+        };
+        let mut edited = bson_to_browser_json(&Bson::Document(existing.clone()));
+        assert_eq!(edited["_id"], serde_json::json!({ "$oid": "507f1f77bcf86cd799439011" }));
+        assert_eq!(edited["date"], serde_json::json!("ISODate(\"2026-06-10T13:59:31.287Z\")"));
+        assert_eq!(edited["unsafe"], serde_json::json!({ "$numberLong": "2326645729978441729" }));
+
+        edited["name"] = serde_json::json!("after");
+        let round_tripped = json_object_to_document_for_update(&edited, None).unwrap();
+
+        assert_eq!(round_tripped.get_str("name").unwrap(), "after");
+        assert!(matches!(
+            round_tripped.get("_id"),
+            Some(Bson::ObjectId(value)) if *value == object_id
+        ));
+        assert!(matches!(round_tripped.get("date"), Some(Bson::DateTime(value)) if *value == date));
+        assert!(matches!(round_tripped.get("unsafe"), Some(Bson::Int64(2_326_645_729_978_441_729))));
+    }
+
+    #[test]
+    fn document_update_rejects_invalid_extended_json_wrapper() {
+        let edited = serde_json::json!({
+            "unsafe": { "$numberLong": "not-an-integer" },
+        });
+
+        assert!(json_object_to_document_for_update(&edited, None).is_err());
+    }
+
+    #[test]
+    fn document_update_parses_wrapper_when_replacing_an_existing_document_value() {
+        let object_id = ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
+        let existing = doc! {
+            "value": { "kind": "plain" },
+        };
+        let edited = serde_json::json!({
+            "value": { "$oid": "507f1f77bcf86cd799439011" },
+        });
+
+        let updated = json_object_to_document_for_update(&edited, Some(&existing)).unwrap();
+
+        assert!(matches!(updated.get("value"), Some(Bson::ObjectId(value)) if *value == object_id));
+    }
+
+    #[test]
+    fn document_update_decodes_uuid_wrapper_per_value() {
+        let uuid = serde_json::json!({ "$uuid": "00112233-4455-6677-8899-aabbccddeeff" });
+        let expected = Bson::try_from(uuid.clone()).unwrap();
+        let edited = serde_json::json!({
+            "name": "after",
+            "uuid": uuid,
+        });
+
+        let updated = json_object_to_document_for_update(&edited, None).unwrap();
+
+        assert_eq!(updated.get("uuid"), Some(&expected));
+    }
+
+    #[test]
+    fn browser_json_filters_decode_normal_scalars_and_unsafe_int64() {
+        let filter = serde_json::json!({
+            "int32": 42,
+            "double": 3.5,
+            "date": "ISODate(\"2026-06-10T13:59:31.287Z\")",
+            "unsafe": { "$numberLong": "2326645729978441729" },
+        });
+        let document = json_filter_to_document(&filter).unwrap();
+
+        assert!(matches!(document.get("int32"), Some(Bson::Int64(42))));
+        assert!(matches!(document.get("double"), Some(Bson::Double(value)) if *value == 3.5));
+        assert!(
+            matches!(document.get("date"), Some(Bson::DateTime(value)) if value.timestamp_millis() == 1_781_099_971_287)
+        );
+        assert!(matches!(document.get("unsafe"), Some(Bson::Int64(2_326_645_729_978_441_729))));
     }
 
     #[test]
