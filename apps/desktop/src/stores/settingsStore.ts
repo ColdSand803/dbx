@@ -15,9 +15,9 @@ import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
-import type { AiProvider, AiApiStyle, AiAuthMethod, AiReasoningLevel, AiConfig, AiTestConnectionResult, AiConfigItem } from "@/types/ai";
+import type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem } from "@/types/ai";
 
-export type { AiProvider, AiApiStyle, AiAuthMethod, AiReasoningLevel, AiConfig, AiTestConnectionResult, AiConfigItem };
+export type { AiProvider, AiApiStyle, AiAuthMethod, AiEffortLevel, AiReasoningLevel, AiConfiguredModel, AiConfig, AiTestConnectionResult, AiConfigItem };
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
@@ -164,6 +164,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: true,
   },
+  "claude-code-cli": {
+    label: "Claude Code CLI",
+    iconSlug: "claudecode",
+    provider: "claude-code-cli",
+    endpoint: "",
+    model: "default",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: false,
+  },
   "codex-cli": {
     label: "Codex CLI",
     iconSlug: "codex",
@@ -192,7 +202,7 @@ const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = Object.from
   }),
 ) as Record<AiProvider, Omit<AiConfig, "apiKey">>;
 
-const AI_REASONING_LEVELS: AiReasoningLevel[] = ["default", "minimal", "low", "medium", "high"];
+const AI_REASONING_LEVELS: AiReasoningLevel[] = ["default", "minimal", "low", "medium", "high", "xhigh", "max"];
 const AI_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function normalizeAiReasoningLevel(value: unknown): AiReasoningLevel {
@@ -226,6 +236,8 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     contextWindow: config?.contextWindow ?? undefined,
     codexCliPath: config?.codexCliPath?.trim() || undefined,
     codexCliEnv: normalizeAiEnv(config?.codexCliEnv),
+    claudeCodeCliPath: config?.claudeCodeCliPath?.trim() || undefined,
+    claudeCodeCliEnv: normalizeAiEnv(config?.claudeCodeCliEnv),
   };
 }
 
@@ -1022,7 +1034,7 @@ export const useSettingsStore = defineStore("settings", () => {
     const config = aiConfigs.value.find((c) => c.id === activeModel.value!.configId);
     if (!config) return false;
     const preset = AI_PROVIDER_PRESETS[config.provider];
-    if (config.provider === "codex-cli") return true;
+    if (config.provider === "codex-cli" || config.provider === "claude-code-cli") return true;
     return !!config.endpoint && !!activeModel.value!.modelId && (!preset.requiresApiKey || !!config.apiKey);
   });
 

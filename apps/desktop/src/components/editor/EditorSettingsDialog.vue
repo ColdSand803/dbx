@@ -32,6 +32,8 @@ import {
   type AiProvider,
   type AiApiStyle,
   type AiAuthMethod,
+  type AiConfiguredModel,
+  type AiEffortLevel,
   type AiReasoningLevel,
   type EditorTheme,
   type DesktopIconTheme,
@@ -44,6 +46,8 @@ import {
   type CustomTheme,
 } from "@/stores/settingsStore";
 import { createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
+import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
+import { normalizeAiModelEffortLevels, normalizeClaudeCodeReasoningLevel } from "@/lib/ai/aiModelEffort";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
 import DangerConfirmDialog from "./DangerConfirmDialog.vue";
@@ -74,6 +78,7 @@ import {
   webdavSyncTest,
   webdavSyncUpload,
   type AppSupportInfo,
+  type AiModelInfo,
   type McpServerStatus,
   type SnippetProvider,
   type SnippetSyncConfig,
@@ -1821,7 +1826,7 @@ watch(
       await refreshSnippetTokenStatus();
       syncAiEditState();
       if (!isWeb && activeSettingsTab.value === "mcp") void refreshMcpStatus();
-      if (!isWeb && activeSettingsTab.value === "ai" && aiIsCodexCli.value) void ensureCodexMcpStatus();
+      if (!isWeb && activeSettingsTab.value === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
       if (activeSettingsTab.value === "about") void refreshAppSupportInfo();
       await scrollToInitialSettingsSection();
     }
@@ -1865,7 +1870,7 @@ watch(snippetProvider, (provider) => {
 
 watch(activeSettingsTab, (tab) => {
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
-  if (tab === "ai" && aiIsCodexCli.value) void ensureCodexMcpStatus();
+  if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
   if (tab === "about" && !appSupportInfo.value) void refreshAppSupportInfo();
   if (tab === "appearance") {
     checkLayoutDescTruncation();
@@ -1925,22 +1930,24 @@ async function changePassword() {
 const aiConfigListMode = ref<"list" | "edit">("list");
 const aiEditConfigName = ref("");
 const aiEditConfigId = ref<string | null>(null);
+const displayedAiConfigs = computed(() => orderAiConfigsForDisplay(settingsStore.aiConfigs));
 
 // AI Config Delete Confirmation
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
 
 // Model list management
-const aiEditModels = ref<Array<{ name: string; label?: string }>>([]);
+const aiEditModels = ref<AiConfiguredModel[]>([]);
 const aiModelListLoading = ref(false);
 let aiModelListRequestToken = 0;
 
 // AI Model Multi-Select
 const aiModelMultiSelectOpen = ref(false);
 const aiModelMultiSelectSearch = ref("");
-const aiFetchedModels = ref<Array<{ id: string; displayName?: string }>>([]);
+const aiFetchedModels = ref<AiModelInfo[]>([]);
 
-const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || provider.provider !== "codex-cli"));
+const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli"]);
+const aiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
 const selectedAiProviderPreset = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value]);
 
 const aiEditProvider = ref<AiProvider>("claude");
@@ -1956,18 +1963,27 @@ const aiEditReasoningLevel = ref<AiReasoningLevel>("default");
 const aiEditContextWindow = ref<number | undefined>(undefined);
 const aiEditCodexCliPath = ref("");
 const aiEditCodexCliEnvRows = ref<AiEnvRow[]>([]);
+const aiEditClaudeCodeCliPath = ref("");
+const aiEditClaudeCodeCliEnvRows = ref<AiEnvRow[]>([]);
 
 const aiModelError = ref("");
 
 const aiCompletionsMode = computed(() => aiEditApiStyle.value === "completions");
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
-const aiReasoningLevelOptions: Array<{ value: AiReasoningLevel; labelKey: string }> = [
+const codexReasoningLevelOptions: Array<{ value: AiReasoningLevel; labelKey: string }> = [
   { value: "default", labelKey: "ai.reasoningLevelDefault" },
   { value: "minimal", labelKey: "ai.reasoningLevelMinimal" },
   { value: "low", labelKey: "ai.reasoningLevelLow" },
   { value: "medium", labelKey: "ai.reasoningLevelMedium" },
   { value: "high", labelKey: "ai.reasoningLevelHigh" },
 ];
+const effortLevelLabelKeys: Record<AiEffortLevel, string> = {
+  low: "ai.reasoningLevelLow",
+  medium: "ai.reasoningLevelMedium",
+  high: "ai.reasoningLevelHigh",
+  xhigh: "ai.reasoningLevelXhigh",
+  max: "ai.reasoningLevelMax",
+};
 
 const aiTesting = ref(false);
 const aiTestResult = ref<"" | "success" | "error">("");
@@ -1975,8 +1991,24 @@ const aiTestError = ref("");
 const aiTestLatency = ref<number | null>(null);
 const aiTestErrorCopied = ref(false);
 const aiIsCodexCli = computed(() => aiEditProvider.value === "codex-cli");
-watch(aiIsCodexCli, (isCodex) => {
-  if (isCodex) void ensureCodexMcpStatus();
+const aiIsClaudeCodeCli = computed(() => aiEditProvider.value === "claude-code-cli");
+const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
+const aiCliProviderLabel = computed(() => selectedAiProviderPreset.value.label);
+const aiCliCommandName = computed(() => (aiIsClaudeCodeCli.value ? "claude" : "codex"));
+const aiCliLoginCommand = computed(() => (aiIsClaudeCodeCli.value ? "claude auth login" : "codex login"));
+const aiEditCliPath = computed({
+  get: () => (aiIsClaudeCodeCli.value ? aiEditClaudeCodeCliPath.value : aiEditCodexCliPath.value),
+  set: (value: string) => {
+    if (aiIsClaudeCodeCli.value) {
+      aiEditClaudeCodeCliPath.value = value;
+    } else {
+      aiEditCodexCliPath.value = value;
+    }
+  },
+});
+const aiEditCliEnvRows = computed(() => (aiIsClaudeCodeCli.value ? aiEditClaudeCodeCliEnvRows.value : aiEditCodexCliEnvRows.value));
+watch(aiIsCliProvider, (isCliProvider) => {
+  if (isCliProvider) void ensureCliMcpStatus();
 });
 const aiRequiresApiKey = computed(() => AI_PROVIDER_PRESETS[aiEditProvider.value].requiresApiKey);
 const aiSupportsAuthMethod = computed(() => aiEditProvider.value === "claude" || (aiEditProvider.value === "custom" && aiAnthropicMessagesMode.value));
@@ -2004,35 +2036,35 @@ const aiEndpointHint = computed(() => {
   }
   return "";
 });
-const aiSupportsApiStyle = computed(() => !aiIsCodexCli.value && (aiEditProvider.value === "openai" || aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom"));
+const aiSupportsApiStyle = computed(() => !aiIsCliProvider.value && (aiEditProvider.value === "openai" || aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "custom"));
 const aiSupportsAnthropicApiStyle = computed(() => aiEditProvider.value === "custom");
-const aiCodexMcpNeedsInstall = computed(() => aiIsCodexCli.value && (!mcpStatus.value || !mcpStatus.value.installed));
-const aiCodexMcpCanInstall = computed(() => {
+const aiCliMcpNeedsInstall = computed(() => aiIsCliProvider.value && (!mcpStatus.value || !mcpStatus.value.installed));
+const aiCliMcpCanInstall = computed(() => {
   const status = mcpStatus.value;
   return !mcpInstalling.value && !!status?.npm_available && (!status.installed || status.update_available);
 });
-const aiCodexMcpActionLabel = computed(() => {
+const aiCliMcpActionLabel = computed(() => {
   if (!mcpStatus.value?.installed) return t("settings.mcpInstallButton");
   if (mcpStatus.value.update_available) return t("settings.mcpUpdateButton");
   return t("settings.mcpUpToDate");
 });
 const aiModelListSupported = computed(() => aiEditProvider.value !== "gemini");
-const aiCanListModels = computed(() => aiModelListSupported.value && (aiIsCodexCli.value || !!aiEditEndpoint.value.trim()) && (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()));
-const aiCodexEnvError = computed(() => codexEnvValidationError());
-const aiCodexPathError = computed(() => {
-  const path = aiEditCodexCliPath.value.trim();
+const aiCanListModels = computed(() => aiModelListSupported.value && (aiIsCliProvider.value || !!aiEditEndpoint.value.trim()) && (!aiRequiresApiKey.value || !!aiEditApiKey.value.trim()));
+const aiCliEnvError = computed(() => cliEnvValidationError());
+const aiCliPathError = computed(() => {
+  const path = aiEditCliPath.value.trim();
   const firstToken = path.split(/\s+/)[0] || "";
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(firstToken) ? t("ai.codexCliPathEnvError") : "";
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(firstToken) ? t("ai.cliPathEnvError", { provider: aiCliProviderLabel.value }) : "";
 });
-const aiCodexValidationError = computed(() => (aiIsCodexCli.value ? aiCodexPathError.value || aiCodexEnvError.value : ""));
+const aiCliValidationError = computed(() => (aiIsCliProvider.value ? aiCliPathError.value || aiCliEnvError.value : ""));
 
 function aiEnvRowsFromConfig(env: unknown): AiEnvRow[] {
   return Object.entries(normalizeAiEnv(env)).map(([key, value]) => ({ id: uuid(), key, value }));
 }
 
-function codexEnvFromRows(): Record<string, string> {
+function cliEnvFromRows(rows = aiEditCliEnvRows.value): Record<string, string> {
   const result: Record<string, string> = {};
-  for (const row of aiEditCodexCliEnvRows.value) {
+  for (const row of rows) {
     const key = row.key.trim();
     if (!key || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || key.toUpperCase().startsWith("DBX_MCP_")) continue;
     result[key] = row.value;
@@ -2040,24 +2072,29 @@ function codexEnvFromRows(): Record<string, string> {
   return result;
 }
 
-function codexEnvValidationError(): string {
-  for (const row of aiEditCodexCliEnvRows.value) {
+function cliEnvValidationError(): string {
+  for (const row of aiEditCliEnvRows.value) {
     const key = row.key.trim();
-    if (key && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return t("ai.codexCliEnvInvalidName", { name: key });
-    if (key.toUpperCase().startsWith("DBX_MCP_")) return t("ai.codexCliEnvReservedName", { name: key });
+    if (key && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return t("ai.cliEnvInvalidName", { name: key });
+    if (key.toUpperCase().startsWith("DBX_MCP_")) return t("ai.cliEnvReservedName", { name: key });
   }
   return "";
 }
 
-function addCodexEnvRow() {
-  aiEditCodexCliEnvRows.value.push({ id: uuid(), key: "", value: "" });
+function addCliEnvRow() {
+  aiEditCliEnvRows.value.push({ id: uuid(), key: "", value: "" });
 }
 
-function removeCodexEnvRow(id: string) {
-  aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
+function removeCliEnvRow(id: string) {
+  if (aiIsClaudeCodeCli.value) {
+    aiEditClaudeCodeCliEnvRows.value = aiEditClaudeCodeCliEnvRows.value.filter((row) => row.id !== id);
+  } else {
+    aiEditCodexCliEnvRows.value = aiEditCodexCliEnvRows.value.filter((row) => row.id !== id);
+  }
 }
 
 function currentAiEditConfig() {
+  const reasoningLevel = aiIsClaudeCodeCli.value ? normalizeClaudeCodeReasoningLevel(aiEditReasoningLevel.value, aiSelectedModelInfo.value) : aiEditReasoningLevel.value;
   return {
     provider: aiEditProvider.value,
     apiKey: aiEditApiKey.value,
@@ -2068,10 +2105,12 @@ function currentAiEditConfig() {
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
-    reasoningLevel: aiEditReasoningLevel.value,
+    reasoningLevel,
     contextWindow: aiEditContextWindow.value || undefined,
     codexCliPath: aiEditCodexCliPath.value.trim() || undefined,
-    codexCliEnv: aiIsCodexCli.value ? codexEnvFromRows() : {},
+    codexCliEnv: aiIsCodexCli.value ? cliEnvFromRows(aiEditCodexCliEnvRows.value) : {},
+    claudeCodeCliPath: aiEditClaudeCodeCliPath.value.trim() || undefined,
+    claudeCodeCliEnv: aiIsClaudeCodeCli.value ? cliEnvFromRows(aiEditClaudeCodeCliEnvRows.value) : {},
   };
 }
 
@@ -2083,7 +2122,7 @@ function syncAiEditState() {
 }
 
 function aiSelectProvider(provider: AiProvider) {
-  if (isWeb && provider === "codex-cli") return;
+  if (isWeb && CLI_AI_PROVIDERS.has(provider)) return;
   if (provider === aiEditProvider.value) return;
 
   // Apply new provider's preset defaults to edit state
@@ -2094,9 +2133,14 @@ function aiSelectProvider(provider: AiProvider) {
   aiEditEndpoint.value = preset.endpoint;
   aiEditModel.value = preset.model;
   aiEditApiStyle.value = preset.apiStyle;
+  aiEditReasoningLevel.value = "default";
   aiEditModels.value = [];
   aiFetchedModels.value = [];
-  if (provider === "codex-cli") void ensureCodexMcpStatus();
+  aiLastModelFetchSignature = "";
+  aiModelListRequestToken += 1;
+  aiModelListLoading.value = false;
+  if (CLI_AI_PROVIDERS.has(provider)) void ensureCliMcpStatus();
+  if (provider === "claude-code-cli") void aiFetchModelList();
 }
 
 function aiSelectApiStyle(style: AiApiStyle) {
@@ -2132,7 +2176,9 @@ function aiEnterEditMode(configId?: string) {
       aiEditContextWindow.value = config.contextWindow;
       aiEditCodexCliPath.value = config.codexCliPath ?? "";
       aiEditCodexCliEnvRows.value = aiEnvRowsFromConfig(config.codexCliEnv);
-      aiEditModels.value = config.models ? [...config.models] : [];
+      aiEditClaudeCodeCliPath.value = config.claudeCodeCliPath ?? "";
+      aiEditClaudeCodeCliEnvRows.value = aiEnvRowsFromConfig(config.claudeCodeCliEnv);
+      aiEditModels.value = config.models ? config.models.map((model) => ({ ...model, supportedEffortLevels: model.supportedEffortLevels ? [...model.supportedEffortLevels] : undefined })) : [];
     }
   } else {
     aiEditConfigName.value = "";
@@ -2150,7 +2196,12 @@ function aiEnterEditMode(configId?: string) {
     aiEditContextWindow.value = undefined;
     aiEditCodexCliPath.value = "";
     aiEditCodexCliEnvRows.value = [];
+    aiEditClaudeCodeCliPath.value = "";
+    aiEditClaudeCodeCliEnvRows.value = [];
   }
+  aiFetchedModels.value = [];
+  aiLastModelFetchSignature = "";
+  if (aiIsClaudeCodeCli.value) void aiFetchModelList();
 }
 
 function aiAddModel() {
@@ -2165,6 +2216,7 @@ async function aiFetchModelList() {
   if (aiModelListLoading.value) return;
   if (!aiCanListModels.value) return;
   const token = ++aiModelListRequestToken;
+  const signature = aiModelFetchSignature.value;
   aiModelListLoading.value = true;
   aiModelError.value = "";
   try {
@@ -2181,18 +2233,26 @@ async function aiFetchModelList() {
       reasoningLevel: aiEditReasoningLevel.value,
       contextWindow: aiEditContextWindow.value,
       codexCliPath: aiEditCodexCliPath.value,
-      codexCliEnv: codexEnvFromRows(),
+      codexCliEnv: cliEnvFromRows(aiEditCodexCliEnvRows.value),
+      claudeCodeCliPath: aiEditClaudeCodeCliPath.value,
+      claudeCodeCliEnv: cliEnvFromRows(aiEditClaudeCodeCliEnvRows.value),
     });
     if (token !== aiModelListRequestToken) return;
-    const seen = new Set<string>();
-    aiFetchedModels.value = models
-      .filter((m: any) => {
-        const id = m.id?.trim();
-        if (!id || seen.has(id)) return false;
-        seen.add(id);
-        return true;
-      })
-      .map((m: any) => ({ id: m.id.trim(), displayName: m.displayName?.trim() || undefined }));
+    aiFetchedModels.value = normalizeAiModelOptions(models);
+    aiLastModelFetchSignature = signature;
+    const fetchedById = new Map(aiFetchedModels.value.map((model) => [model.id, model]));
+    aiEditModels.value = aiEditModels.value.map((model) => {
+      const fetched = fetchedById.get(model.name);
+      if (!fetched) return model;
+      return {
+        name: model.name,
+        label: fetched.displayName || model.label,
+        supportedEffortLevels: fetched.supportedEffortLevels,
+      };
+    });
+    if (aiIsClaudeCodeCli.value) {
+      aiEditReasoningLevel.value = normalizeClaudeCodeReasoningLevel(aiEditReasoningLevel.value, aiSelectedModelInfo.value);
+    }
   } catch (e: any) {
     if (token === aiModelListRequestToken) {
       aiModelError.value = e?.message || String(e);
@@ -2206,12 +2266,16 @@ function aiIsModelSelected(modelId: string): boolean {
   return aiEditModels.value.some((m) => m.name === modelId);
 }
 
-function aiToggleModel(model: { id: string; displayName?: string }) {
+function aiToggleModel(model: AiModelInfo) {
   const index = aiEditModels.value.findIndex((m) => m.name === model.id);
   if (index >= 0) {
     aiEditModels.value.splice(index, 1);
   } else {
-    aiEditModels.value.push({ name: model.id, label: model.displayName || model.id });
+    aiEditModels.value.push({
+      name: model.id,
+      label: model.displayName || model.id,
+      supportedEffortLevels: normalizeAiModelEffortLevels(model.supportedEffortLevels),
+    });
   }
 }
 
@@ -2228,16 +2292,97 @@ const aiModelFetchSignature = computed(() =>
     apiKey: aiEditApiKey.value.trim(),
     authMethod: aiEditAuthMethod.value,
     apiStyle: aiEditApiStyle.value,
+    codexCliPath: aiEditCodexCliPath.value.trim(),
+    codexCliEnv: cliEnvFromRows(aiEditCodexCliEnvRows.value),
+    claudeCodeCliPath: aiEditClaudeCodeCliPath.value.trim(),
+    claudeCodeCliEnv: cliEnvFromRows(aiEditClaudeCodeCliEnvRows.value),
   }),
 );
 
 let aiLastModelFetchSignature = "";
 
+function normalizeAiModelOptions(models: AiModelInfo[]): AiModelInfo[] {
+  const seen = new Set<string>();
+  const normalized: AiModelInfo[] = [];
+  for (const model of models) {
+    const id = model.id?.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const supportedEffortLevels = normalizeAiModelEffortLevels(model.supportedEffortLevels);
+    normalized.push({
+      id,
+      displayName: model.displayName?.trim() || undefined,
+      supportedEffortLevels: supportedEffortLevels.length ? supportedEffortLevels : undefined,
+    });
+  }
+  return normalized;
+}
+
+const aiSelectedModelInfo = computed<AiModelInfo | undefined>(() => {
+  if (aiModelFetchSignature.value === aiLastModelFetchSignature) {
+    const fetched = aiFetchedModels.value.find((model) => model.id === aiEditModel.value);
+    if (fetched) return fetched;
+  }
+  const configured = aiEditModels.value.find((model) => model.name === aiEditModel.value);
+  if (!configured) return undefined;
+  return {
+    id: configured.name,
+    displayName: configured.label,
+    supportedEffortLevels: configured.supportedEffortLevels,
+  };
+});
+const aiClaudeCodeEffortLevels = computed(() => normalizeAiModelEffortLevels(aiSelectedModelInfo.value?.supportedEffortLevels));
+const aiReasoningLevelOptions = computed<Array<{ value: AiReasoningLevel; labelKey: string }>>(() => {
+  if (!aiIsClaudeCodeCli.value) return codexReasoningLevelOptions;
+  return [{ value: "default", labelKey: "ai.reasoningLevelDefault" }, ...aiClaudeCodeEffortLevels.value.map((value) => ({ value, labelKey: effortLevelLabelKeys[value] }))];
+});
+const aiReasoningLevelDisabled = computed(() => aiIsClaudeCodeCli.value && aiClaudeCodeEffortLevels.value.length === 0);
+const aiReasoningLevelHint = computed(() => {
+  if (!aiIsClaudeCodeCli.value) return t("ai.reasoningLevelHint");
+  if (aiModelListLoading.value && aiClaudeCodeEffortLevels.value.length === 0) return t("ai.loadingModels");
+  return aiClaudeCodeEffortLevels.value.length ? t("ai.claudeCodeEffortHint") : t("ai.claudeCodeEffortUnavailable");
+});
+
+watch([aiIsClaudeCodeCli, aiSelectedModelInfo], () => {
+  if (!aiIsClaudeCodeCli.value) return;
+  aiEditReasoningLevel.value = normalizeClaudeCodeReasoningLevel(aiEditReasoningLevel.value, aiSelectedModelInfo.value);
+});
+
+function aiModelsForSave(): AiConfiguredModel[] | undefined {
+  const models = aiEditModels.value
+    .map((model) => {
+      const supportedEffortLevels = normalizeAiModelEffortLevels(model.supportedEffortLevels);
+      return {
+        name: model.name.trim(),
+        label: model.label?.trim() || undefined,
+        supportedEffortLevels: supportedEffortLevels.length ? supportedEffortLevels : undefined,
+      };
+    })
+    .filter((model) => model.name);
+
+  if (aiIsClaudeCodeCli.value && aiEditModel.value.trim() && aiSelectedModelInfo.value) {
+    const modelId = aiEditModel.value.trim();
+    const supportedEffortLevels = normalizeAiModelEffortLevels(aiSelectedModelInfo.value.supportedEffortLevels);
+    const configuredModel = models.find((model) => model.name === modelId);
+    if (configuredModel) {
+      configuredModel.label = aiSelectedModelInfo.value.displayName || configuredModel.label;
+      configuredModel.supportedEffortLevels = supportedEffortLevels.length ? supportedEffortLevels : undefined;
+    } else {
+      models.unshift({
+        name: modelId,
+        label: aiSelectedModelInfo.value.displayName,
+        supportedEffortLevels: supportedEffortLevels.length ? supportedEffortLevels : undefined,
+      });
+    }
+  }
+
+  return models.length ? models : undefined;
+}
+
 function aiOnModelPopoverOpen(open: boolean) {
   if (!open) return;
   if (aiModelFetchSignature.value !== aiLastModelFetchSignature) {
     aiFetchedModels.value = [];
-    aiLastModelFetchSignature = aiModelFetchSignature.value;
     if (aiCanListModels.value) void aiFetchModelList();
   } else if (aiFetchedModels.value.length === 0 && aiCanListModels.value) {
     void aiFetchModelList();
@@ -2255,23 +2400,14 @@ async function aiSaveConfig() {
     return;
   }
 
+  const editConfig = currentAiEditConfig();
+  aiEditReasoningLevel.value = editConfig.reasoningLevel;
+  const models = aiModelsForSave();
   const config: AiConfigItem = {
     id: aiEditConfigId.value || generateId(),
     name: aiEditConfigName.value,
-    provider: aiEditProvider.value,
-    apiKey: aiEditApiKey.value,
-    authMethod: aiEditAuthMethod.value,
-    endpoint: aiEditEndpoint.value,
-    model: aiEditModel.value,
-    models: aiEditModels.value.length > 0 ? aiEditModels.value.filter((m) => m.name.trim()) : undefined,
-    apiStyle: aiEditApiStyle.value,
-    proxyEnabled: aiEditProxyEnabled.value,
-    proxyUrl: aiEditProxyUrl.value,
-    enableThinking: aiEditEnableThinking.value,
-    reasoningLevel: aiEditReasoningLevel.value,
-    contextWindow: aiEditContextWindow.value,
-    codexCliPath: aiEditCodexCliPath.value,
-    codexCliEnv: codexEnvFromRows(),
+    ...editConfig,
+    models,
   };
 
   try {
@@ -2318,10 +2454,10 @@ async function aiSetDefaultConfig(id: string) {
 }
 
 async function aiTestConn() {
-  if ((aiRequiresApiKey.value && !aiEditApiKey.value.trim()) || (!aiIsCodexCli.value && !aiEditEndpoint.value.trim()) || (!aiIsCodexCli.value && !aiEditModel.value.trim())) return;
-  if (aiCodexValidationError.value) {
+  if ((aiRequiresApiKey.value && !aiEditApiKey.value.trim()) || (!aiIsCliProvider.value && !aiEditEndpoint.value.trim()) || (!aiIsCliProvider.value && !aiEditModel.value.trim())) return;
+  if (aiCliValidationError.value) {
     aiTestResult.value = "error";
-    aiTestError.value = aiCodexValidationError.value;
+    aiTestError.value = aiCliValidationError.value;
     return;
   }
   aiTesting.value = true;
@@ -2350,8 +2486,8 @@ async function copyAiTestError() {
   }, 1500);
 }
 
-async function ensureCodexMcpStatus() {
-  if (isWeb || activeSettingsTab.value !== "ai" || !aiIsCodexCli.value || mcpStatus.value || mcpStatusLoading.value) return;
+async function ensureCliMcpStatus() {
+  if (isWeb || activeSettingsTab.value !== "ai" || !aiIsCliProvider.value || mcpStatus.value || mcpStatusLoading.value) return;
   await refreshMcpStatus();
 }
 
@@ -4293,7 +4429,7 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <div v-else class="space-y-2">
-                  <div v-for="config in settingsStore.aiConfigs" :key="config.id" class="flex items-center justify-between rounded-md border p-3" :class="{ 'border-primary bg-primary/5': config.isDefault }">
+                  <div v-for="config in displayedAiConfigs" :key="config.id" class="flex items-center justify-between rounded-md border p-3" :class="{ 'border-primary bg-primary/5': config.isDefault }">
                     <div class="flex items-center gap-3">
                       <AiProviderLogo :provider="config.provider" :label="config.provider" :icon-slug="AI_PROVIDER_PRESETS[config.provider].iconSlug" />
                       <div>
@@ -4354,21 +4490,21 @@ onUnmounted(cleanupPreviewEditor);
                   </Select>
                 </div>
 
-                <!-- Codex CLI MCP Status -->
-                <div v-if="aiIsCodexCli && !isWeb" class="rounded-md border px-3 py-2.5 text-xs" :class="aiCodexMcpNeedsInstall ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300'">
+                <!-- CLI MCP Status -->
+                <div v-if="aiIsCliProvider && !isWeb" class="rounded-md border px-3 py-2.5 text-xs" :class="aiCliMcpNeedsInstall ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300'">
                   <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                     <div class="min-w-0 space-y-1">
                       <div class="flex min-w-0 items-center gap-2 font-medium">
                         <Loader2 v-if="mcpStatusLoading" class="h-3.5 w-3.5 shrink-0 animate-spin" />
-                        <AlertTriangle v-else-if="aiCodexMcpNeedsInstall || mcpStatus?.error || mcpStatusError" class="h-3.5 w-3.5 shrink-0" />
+                        <AlertTriangle v-else-if="aiCliMcpNeedsInstall || mcpStatus?.error || mcpStatusError" class="h-3.5 w-3.5 shrink-0" />
                         <CheckCircle2 v-else class="h-3.5 w-3.5 shrink-0" />
-                        <span>{{ t("ai.codexMcpRequiredTitle") }}</span>
+                        <span>{{ t("ai.cliMcpRequiredTitle") }}</span>
                         <Badge variant="outline" class="h-5 shrink-0 rounded-md border-current/30 px-1.5 text-[11px] font-normal">
                           {{ mcpStatusLabel }}
                         </Badge>
                       </div>
                       <p class="leading-relaxed">
-                        {{ t("ai.codexMcpRequiredDescription") }}
+                        {{ t("ai.cliMcpRequiredDescription", { provider: aiCliProviderLabel }) }}
                       </p>
                       <p v-if="mcpStatus?.error || mcpStatusError" class="select-text leading-relaxed">
                         {{ mcpStatusError || mcpStatus?.error }}
@@ -4380,16 +4516,16 @@ onUnmounted(cleanupPreviewEditor);
                         <RefreshCw v-else class="mr-1 h-3 w-3" />
                         {{ t("settings.mcpRefresh") }}
                       </Button>
-                      <Button v-if="aiCodexMcpNeedsInstall || mcpStatus?.update_available" type="button" size="sm" class="h-7 px-2 text-xs" :disabled="!aiCodexMcpCanInstall" @click="installMcp">
+                      <Button v-if="aiCliMcpNeedsInstall || mcpStatus?.update_available" type="button" size="sm" class="h-7 px-2 text-xs" :disabled="!aiCliMcpCanInstall" @click="installMcp">
                         <Loader2 v-if="mcpInstalling" class="mr-1 h-3 w-3 animate-spin" />
-                        {{ mcpInstalling ? t("settings.mcpInstalling") : aiCodexMcpActionLabel }}
+                        {{ mcpInstalling ? t("settings.mcpInstalling") : aiCliMcpActionLabel }}
                       </Button>
                     </div>
                   </div>
                 </div>
 
                 <!-- Authentication -->
-                <div v-if="!aiIsCodexCli && aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCliProvider && aiSupportsAuthMethod" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">Authentication</Label>
                   <Select v-model="aiEditAuthMethod">
                     <SelectTrigger class="col-span-2" inputClass="h-8 text-xs">
@@ -4403,13 +4539,13 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <!-- API Key -->
-                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ aiCredentialLabel }}</Label>
                   <PasswordInput v-model="aiEditApiKey" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" :placeholder="aiCredentialPlaceholder" />
                 </div>
 
                 <!-- Endpoint -->
-                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">Endpoint</Label>
                   <div class="col-span-2 space-y-1.5">
                     <Input v-model="aiEditEndpoint" :placeholder="aiEndpointPlaceholder" autocomplete="off" class="h-8 text-xs" />
@@ -4417,35 +4553,35 @@ onUnmounted(cleanupPreviewEditor);
                   </div>
                 </div>
 
-                <!-- Codex CLI Path -->
-                <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
-                  <Label class="pt-2 text-right text-xs">{{ t("ai.codexCliPath") }}</Label>
+                <!-- CLI Path -->
+                <div v-if="aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.cliPath", { provider: aiCliProviderLabel }) }}</Label>
                   <div class="col-span-2 space-y-1.5">
-                    <Input v-model="aiEditCodexCliPath" autocomplete="off" class="h-8 text-xs" placeholder="codex" />
-                    <p class="text-[11px] text-muted-foreground">{{ t("ai.codexCliPathHint") }}</p>
-                    <p v-if="aiCodexPathError" class="text-[11px] text-destructive">{{ aiCodexPathError }}</p>
+                    <Input v-model="aiEditCliPath" autocomplete="off" class="h-8 text-xs" :placeholder="aiCliCommandName" />
+                    <p class="text-[11px] text-muted-foreground">{{ t("ai.cliPathHint", { command: aiCliCommandName, loginCommand: aiCliLoginCommand }) }}</p>
+                    <p v-if="aiCliPathError" class="text-[11px] text-destructive">{{ aiCliPathError }}</p>
                   </div>
                 </div>
 
-                <!-- Codex CLI Env -->
-                <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
-                  <Label class="pt-2 text-right text-xs">{{ t("ai.codexCliEnv") }}</Label>
+                <!-- CLI Env -->
+                <div v-if="aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="pt-2 text-right text-xs">{{ t("ai.cliEnv") }}</Label>
                   <div class="col-span-2 space-y-2">
                     <div class="space-y-1.5">
-                      <div v-for="row in aiEditCodexCliEnvRows" :key="row.id" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.3fr)_2rem] gap-2">
-                        <Input v-model="row.key" autocomplete="off" class="h-8 font-mono text-xs" :placeholder="t('ai.codexCliEnvKeyPlaceholder')" />
-                        <Input v-model="row.value" autocomplete="off" class="h-8 font-mono text-xs" :placeholder="t('ai.codexCliEnvValuePlaceholder')" />
-                        <Button type="button" variant="ghost" size="icon" class="h-8 w-8" :title="t('common.remove')" :aria-label="t('common.remove')" @click="removeCodexEnvRow(row.id)">
+                      <div v-for="row in aiEditCliEnvRows" :key="row.id" class="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.3fr)_2rem] gap-2">
+                        <Input v-model="row.key" autocomplete="off" class="h-8 font-mono text-xs" :placeholder="t('ai.cliEnvKeyPlaceholder')" />
+                        <Input v-model="row.value" autocomplete="off" class="h-8 font-mono text-xs" :placeholder="t('ai.cliEnvValuePlaceholder')" />
+                        <Button type="button" variant="ghost" size="icon" class="h-8 w-8" :title="t('common.remove')" :aria-label="t('common.remove')" @click="removeCliEnvRow(row.id)">
                           <X class="h-3.5 w-3.5" />
                         </Button>
                       </div>
                     </div>
-                    <Button type="button" variant="outline" size="sm" class="h-7 px-2 text-xs" @click="addCodexEnvRow">
+                    <Button type="button" variant="outline" size="sm" class="h-7 px-2 text-xs" @click="addCliEnvRow">
                       <Plus class="mr-1 h-3.5 w-3.5" />
-                      {{ t("ai.codexCliEnvAdd") }}
+                      {{ t("ai.cliEnvAdd") }}
                     </Button>
-                    <p v-if="aiCodexEnvError" class="text-[11px] text-destructive">{{ aiCodexEnvError }}</p>
-                    <p v-else class="text-[11px] text-muted-foreground">{{ t("ai.codexCliEnvHint") }}</p>
+                    <p v-if="aiCliEnvError" class="text-[11px] text-destructive">{{ aiCliEnvError }}</p>
+                    <p v-else class="text-[11px] text-muted-foreground">{{ t("ai.cliEnvHint", { provider: aiCliProviderLabel }) }}</p>
                   </div>
                 </div>
 
@@ -4506,10 +4642,10 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <!-- Reasoning Level -->
-                <div v-if="aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="aiIsCodexCli || aiIsClaudeCodeCli" class="grid grid-cols-3 items-start gap-3">
                   <Label class="pt-2 text-right text-xs">{{ t("ai.reasoningLevel") }}</Label>
                   <div class="col-span-2 space-y-1.5">
-                    <Select v-model="aiEditReasoningLevel">
+                    <Select v-model="aiEditReasoningLevel" :disabled="aiReasoningLevelDisabled">
                       <SelectTrigger inputClass="h-8 text-xs">
                         <SelectValue />
                       </SelectTrigger>
@@ -4519,7 +4655,7 @@ onUnmounted(cleanupPreviewEditor);
                         </SelectItem>
                       </SelectContent>
                     </Select>
-                    <p class="text-[11px] text-muted-foreground">{{ t("ai.reasoningLevelHint") }}</p>
+                    <p class="text-[11px] text-muted-foreground">{{ aiReasoningLevelHint }}</p>
                   </div>
                 </div>
 
@@ -4534,7 +4670,7 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <!-- Enable Thinking -->
-                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.enableThinking") }}</Label>
                   <div class="col-span-2 flex items-center gap-2">
                     <label class="flex items-center gap-2 text-xs text-muted-foreground">
@@ -4553,7 +4689,7 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <!-- Context Window -->
-                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-start gap-3">
+                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
                   <Label class="text-right text-xs">{{ t("ai.contextWindow") }}</Label>
                   <div class="col-span-2">
                     <Input v-model.number="aiEditContextWindow" type="number" min="1000" step="1000" class="h-8 text-xs" :placeholder="t('ai.contextWindowAuto')" />
@@ -4562,7 +4698,7 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <!-- Proxy -->
-                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxy") }}</Label>
                   <label class="col-span-2 flex items-center gap-2 text-xs text-muted-foreground">
                     <input v-model="aiEditProxyEnabled" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
@@ -4571,7 +4707,7 @@ onUnmounted(cleanupPreviewEditor);
                 </div>
 
                 <!-- Proxy URL -->
-                <div v-if="!aiIsCodexCli" class="grid grid-cols-3 items-center gap-3">
+                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
                   <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
                 </div>
@@ -4958,7 +5094,7 @@ onUnmounted(cleanupPreviewEditor);
             </template>
             <template v-else>
               <div class="flex flex-1 items-center gap-2">
-                <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCodexValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCodexCli && !aiEditEndpoint?.trim()) || (!aiIsCodexCli && !aiEditModel?.trim())" @click="aiTestConn">
+                <Button size="sm" variant="outline" :disabled="aiTesting || !!aiCliValidationError || (aiRequiresApiKey && !aiEditApiKey?.trim()) || (!aiIsCliProvider && !aiEditEndpoint?.trim()) || (!aiIsCliProvider && !aiEditModel?.trim())" @click="aiTestConn">
                   <Loader2 v-if="aiTesting" class="h-3 w-3 animate-spin mr-1" />
                   {{ t("connection.test") }}
                 </Button>
@@ -4983,7 +5119,7 @@ onUnmounted(cleanupPreviewEditor);
                 </span>
               </div>
               <Button variant="outline" @click="aiEnterListMode()">{{ t("common.cancel") }}</Button>
-              <Button :disabled="!aiEditConfigName.trim() || !!aiCodexValidationError" @click="aiSaveConfig">{{ t("settings.apply") }}</Button>
+              <Button :disabled="!aiEditConfigName.trim() || !!aiCliValidationError" @click="aiSaveConfig">{{ t("settings.apply") }}</Button>
             </template>
           </DialogFooter>
 
