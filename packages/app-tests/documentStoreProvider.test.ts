@@ -53,8 +53,11 @@ test("providers build store-specific query previews", () => {
 
 test("builds reusable document filter conditions", () => {
   assert.deepEqual(buildDocumentFilterCondition(rule({})), { city: "长治" });
-  assert.deepEqual(buildDocumentFilterCondition(rule({ mode: "not-like", rawValue: "test" })), {
-    city: { $not: { $regex: "test", $options: "i" } },
+  assert.deepEqual(buildDocumentFilterCondition(rule({ mode: "like", rawValue: "a.b[0]*" })), {
+    city: { $regex: "a\\.b\\[0\\]\\*", $options: "i" },
+  });
+  assert.deepEqual(buildDocumentFilterCondition(rule({ mode: "not-like", rawValue: "test?" })), {
+    city: { $not: { $regex: "test\\?", $options: "i" } },
   });
   assert.deepEqual(buildDocumentFilterCondition(rule({ mode: "is-not-null", rawValue: "" })), { city: { $ne: null } });
 });
@@ -73,6 +76,27 @@ test("preserves Extended JSON types for MongoDB structured filters", () => {
       sampleValue: { $date: "2025-01-01T00:00:00Z" },
     }),
     { "profile.createdAt": { $date: "2026-07-13T00:00:00Z" } },
+  );
+  assert.deepEqual(
+    buildDocumentFilterCondition(rule({ fieldName: "ownerIds", rawValue: "507f1f77bcf86cd799439013" }), {
+      kind: "mongodb",
+      sampleValue: [{ $oid: "507f1f77bcf86cd799439011" }, null, { $oid: "507f1f77bcf86cd799439012" }],
+    }),
+    { ownerIds: { $oid: "507f1f77bcf86cd799439013" } },
+  );
+  assert.deepEqual(
+    buildDocumentFilterCondition(rule({ fieldName: "eventDates", rawValue: "2026-07-13T00:00:00Z" }), {
+      kind: "mongodb",
+      sampleValue: [{ $date: "2025-01-01T00:00:00Z" }, { $date: { $numberLong: "1752364800000" } }],
+    }),
+    { eventDates: { $date: "2026-07-13T00:00:00Z" } },
+  );
+  assert.deepEqual(
+    buildDocumentFilterCondition(rule({ fieldName: "mixed", rawValue: "507f1f77bcf86cd799439013" }), {
+      kind: "mongodb",
+      sampleValue: [{ $oid: "507f1f77bcf86cd799439011" }, "plain-string"],
+    }),
+    { mixed: "507f1f77bcf86cd799439013" },
   );
 });
 

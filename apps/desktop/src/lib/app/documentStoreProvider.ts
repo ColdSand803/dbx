@@ -356,9 +356,9 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
     case "not-equals":
       return { [rule.fieldName]: { $ne: value } };
     case "like":
-      return { [rule.fieldName]: { $regex: textValue, $options: "i" } };
+      return { [rule.fieldName]: { $regex: escapeRegexLiteral(textValue), $options: "i" } };
     case "not-like":
-      return { [rule.fieldName]: { $not: { $regex: textValue, $options: "i" } } };
+      return { [rule.fieldName]: { $not: { $regex: escapeRegexLiteral(textValue), $options: "i" } } };
     case "greater-than":
       return { [rule.fieldName]: { $gt: value } };
     case "less-than":
@@ -368,6 +368,10 @@ export function buildDocumentFilterCondition(rule: DocumentFilterRule, options: 
     case "is-not-null":
       return { [rule.fieldName]: { $ne: null } };
   }
+}
+
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function combineDocumentFilterConditions(conditions: Record<string, unknown>[], rules: Pick<DocumentFilterRule, "conjunction">[], arrayObjectParents: Array<string | null> = []): Record<string, unknown> | null {
@@ -559,11 +563,33 @@ function parseDocumentFilterValue(raw: string, options: DocumentFilterParseOptio
 }
 
 function mongoTypedFilterValue(raw: string, options: DocumentFilterParseOptions): unknown {
-  if (options.kind !== "mongodb" || !isPlainRecord(options.sampleValue)) return raw;
-  if (typeof options.sampleValue.$oid === "string") return { $oid: raw };
-  if ("$date" in options.sampleValue) return { $date: raw };
-  if (typeof options.sampleValue.$numberLong === "string" && /^-?\d+$/.test(raw)) return { $numberLong: raw };
+  if (options.kind !== "mongodb") return raw;
+  const sampleValue = mongoTypedFilterSample(options.sampleValue);
+  if (!sampleValue) return raw;
+  if (typeof sampleValue.$oid === "string") return { $oid: raw };
+  if ("$date" in sampleValue) return { $date: raw };
+  if (typeof sampleValue.$numberLong === "string" && /^-?\d+$/.test(raw)) return { $numberLong: raw };
   return raw;
+}
+
+function mongoTypedFilterSample(sampleValue: unknown): Record<string, unknown> | null {
+  if (isPlainRecord(sampleValue)) return sampleValue;
+  if (!Array.isArray(sampleValue)) return null;
+
+  const samples = sampleValue.filter((value) => value !== null && value !== undefined);
+  if (!samples.length || samples.some((value) => !isPlainRecord(value))) return null;
+  const records = samples as Record<string, unknown>[];
+  const sampleKind = mongoTypedFilterSampleKind(records[0]);
+  // Mixed arrays are ambiguous, so infer a BSON type only from homogeneous scalar wrappers.
+  if (!sampleKind || records.some((value) => mongoTypedFilterSampleKind(value) !== sampleKind)) return null;
+  return records[0];
+}
+
+function mongoTypedFilterSampleKind(sampleValue: Record<string, unknown>): "$oid" | "$date" | "$numberLong" | null {
+  if (typeof sampleValue.$oid === "string") return "$oid";
+  if ("$date" in sampleValue) return "$date";
+  if (typeof sampleValue.$numberLong === "string") return "$numberLong";
+  return null;
 }
 
 export function elasticsearchSearchBodyFromDocumentQuery(options: Pick<DocumentStoreQueryPreviewOptions, "filterJson" | "sortJson" | "skip" | "limit">): Record<string, unknown> {
