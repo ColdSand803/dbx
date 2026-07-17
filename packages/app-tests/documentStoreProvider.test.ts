@@ -127,6 +127,31 @@ test("builds hierarchical document field path tree for array objects", () => {
   );
 });
 
+test("excludes BSON Extended JSON wrappers from array document field paths", () => {
+  const tree = documentFieldPathTreeFromDocuments([
+    {
+      _id: "1",
+      timestamps: [{ $date: { $numberLong: "1752364800000" } }, { $date: { $numberLong: "1752451200000" } }],
+      ownerIds: [{ $oid: "507f1f77bcf86cd799439011" }],
+      sequences: [{ $numberLong: "9007199254740993" }],
+      nestedDates: [[{ $date: { $numberLong: "1752364800000" } }]],
+      events: [{ at: { $date: { $numberLong: "1752364800000" } }, by: "ops" }, { $date: { $numberLong: "1752451200000" } }],
+    },
+  ]);
+  const flattened = flattenDocumentFieldPathTree(tree);
+
+  assert.deepEqual(
+    flattened.map((node) => node.path),
+    ["_id", "timestamps", "ownerIds", "sequences", "nestedDates", "events", "events.at", "events.by"],
+  );
+  assert.equal(flattened.find((node) => node.path === "timestamps")?.kind, "array");
+  assert.equal(flattened.find((node) => node.path === "ownerIds")?.kind, "array");
+  assert.equal(flattened.find((node) => node.path === "sequences")?.kind, "array");
+  assert.equal(flattened.find((node) => node.path === "nestedDates")?.kind, "array");
+  assert.equal(flattened.find((node) => node.path === "events")?.kind, "array-object");
+  assert.equal(flattened.find((node) => node.path === "events.at")?.kind, "scalar");
+});
+
 test("searches nested document field paths", () => {
   const tree = documentFieldPathTreeFromDocuments([{ profile: { address: { zip: 200000 }, city: "Shanghai" }, orders: [{ sku: "A" }] }]);
   assert.deepEqual(

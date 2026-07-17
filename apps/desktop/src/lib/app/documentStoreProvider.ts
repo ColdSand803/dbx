@@ -183,7 +183,7 @@ function collectArrayDocumentFieldPathNodes(parent: DocumentFieldPathAccumulator
   if (depth > 6) return;
   for (const value of values) {
     if (Array.isArray(value)) collectArrayDocumentFieldPathNodes(parent, value, depth + 1);
-    else if (isPlainRecord(value)) collectNestedDocumentFieldPathNodes(parent, value, depth);
+    else if (isPlainRecord(value) && !isBsonExtendedJsonWrapper(value)) collectNestedDocumentFieldPathNodes(parent, value, depth);
   }
 }
 
@@ -229,7 +229,7 @@ function isBsonExtendedJsonWrapper(value: unknown): value is Record<string, unkn
 }
 
 function arrayContainsPlainRecord(values: readonly unknown[]): boolean {
-  return values.some((value) => isPlainRecord(value) || (Array.isArray(value) && arrayContainsPlainRecord(value)));
+  return values.some((value) => (isPlainRecord(value) && !isBsonExtendedJsonWrapper(value)) || (Array.isArray(value) && arrayContainsPlainRecord(value)));
 }
 
 function mergeDocumentFieldPathKind(current: DocumentFieldPathKind, next: DocumentFieldPathKind): DocumentFieldPathKind {
