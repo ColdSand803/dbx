@@ -2140,8 +2140,8 @@ export async function mongoServerVersion(connectionId: string, database: string,
   return post("/api/mongo/server-version", { connectionId, database, executionId });
 }
 
-export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
-  return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
+export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, optionsJson?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, optionsJson, executionId });
 }
 
 export async function mongoDistinct(connectionId: string, database: string, collection: string, field: string, filter?: string, executionId?: string): Promise<MongoDocumentResult> {

@@ -69,6 +69,7 @@ import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
 import { compactHeaderColumnType, resolveHeaderColumnType } from "@/lib/dataGrid/dataGridColumnType";
@@ -228,6 +229,8 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
+const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMultiRowTranspose);
+const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
 const { isDark, themePalette } = useTheme();
 const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
@@ -343,7 +346,6 @@ if (isDebugLoggingEnabled()) {
 
 const transposeRowIndex = ref<number | null>(null);
 const showTranspose = ref(false);
-const multiRowTranspose = ref(false);
 const preserveTransposeOnNextResult = ref(false);
 
 watch(
@@ -1559,11 +1561,6 @@ function onSearchKeydown(e: KeyboardEvent) {
   }
 }
 
-function clearWhereFilterInput() {
-  whereFilterInput.value = "";
-  void applyWhereFilter();
-}
-
 watch(whereFilterInput, () => {
   emit("update:whereInput", currentWhereInput() ?? "");
   persistStructuredFilterState();
@@ -1676,6 +1673,8 @@ const {
   columnOrderKeys,
   layoutScopeKey: columnLayoutScopeKey,
   tableScopeKey: tableColumnOrderScopeKey,
+  hideNullColumns,
+  onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: refreshGridScrollerMetrics,
 });
 const goToColumnItems = computed(() =>
@@ -2253,7 +2252,7 @@ watch(
 );
 
 // --- Pagination ---
-const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.pageSize));
+const pageSize = ref(normalizeResultPageSize(props.context === "table-data" ? (props.pageLimit ?? tableOpenPageLimit()) : settingsStore.editorSettings.pageSize));
 const currentPage = ref(1);
 const pageSizeOptions = computed(() => resultPageSizeMenuOptions(pageSize.value));
 const customPageSizeInput = ref(String(pageSize.value));
@@ -2272,6 +2271,8 @@ watch(pageSize, (value) => {
 watch(
   () => settingsStore.editorSettings.pageSize,
   (value) => {
+    // Table-data segments keep their own pagination state instead of following SQL result settings.
+    if (props.context === "table-data") return;
     pageSize.value = normalizeResultPageSize(value, pageSize.value);
   },
 );
@@ -6116,7 +6117,8 @@ function scrollTransposeRecordIntoView(rowIndex: number) {
 }
 
 function setMultiRowTranspose(value: boolean) {
-  multiRowTranspose.value = value;
+  if (multiRowTranspose.value === value) return;
+  settingsStore.updateEditorSettings({ dataGridMultiRowTranspose: value });
   if (!showTranspose.value) return;
   nextTick(updateTransposeViewport);
   if (value && transposeRowIndex.value !== null) {
@@ -7442,7 +7444,6 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   :mode-options="filterModeOptions"
                   :column-search="filterBuilderColumnSearch"
                   :apply-where="applyWhereFilter"
-                  :clear-where="clearWhereFilterInput"
                   :apply-order-by="applyOrderBySearch"
                   :clear-order-by="clearOrderByInput"
                   @update:column-search="filterBuilderColumnSearch = $event"

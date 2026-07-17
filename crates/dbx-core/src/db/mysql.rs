@@ -796,7 +796,7 @@ fn create_pool(
         .stmt_cache_size(0)
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
-        .tcp_keepalive(Some(MYSQL_TCP_KEEPALIVE_MS))
+        .tcp_keepalive(Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS))))
         .setup(setup_queries);
     if let Some(ssl_opts) = mysql_ssl_opts(base_ssl_opts, url, ca_cert_path, &tls_url.files)? {
         builder = builder.ssl_opts(ssl_opts);
