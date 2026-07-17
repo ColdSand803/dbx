@@ -27,6 +27,18 @@ test("adds SQL Server READONLY for table-valued procedure parameters", () => {
   assert.equal(countParsedNodes(dialect, "CREATE PROCEDURE [dbo].[gylxcx](@tp2 XTableType5 readonly,@tp xtabletype2 readonly) AS SELECT 1", "Keyword", "readonly"), 2);
 });
 
+test("uses MSSQL keywords for an ASE JDBC editor override", () => {
+  const dialect = createDbxCodeMirrorSqlDialect(langSql, "sqlserver", "jdbc");
+
+  assert.equal(countParsedNodes(dialect, "SELECT top 1 * FROM wfAdmin AS wa", "Keyword", "top"), 1);
+});
+
+test("keeps generic JDBC on Standard SQL without the ASE editor override", () => {
+  const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "jdbc");
+
+  assert.equal(countParsedNodes(dialect, "SELECT top 1 * FROM wfAdmin AS wa", "Keyword", "top"), 0);
+});
+
 test("keeps DBX PostgreSQL procedural dialect extensions", () => {
   const dialect = createDbxCodeMirrorSqlDialect(langSql, "postgres");
 
@@ -85,10 +97,12 @@ test("keeps MySQL-compatible double-dash whitespace rules", () => {
 
 test("propagates database type to every DDL viewer entrypoint", () => {
   const ddlViewDialog = readFileSync("apps/desktop/src/components/objects/DdlViewDialog.vue", "utf8");
-  const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
+  const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
   const app = readFileSync("apps/desktop/src/App.vue", "utf8");
 
   assert.match(ddlViewDialog, /createDbxCodeMirrorSqlDialect\(langSql, props\.dialect, props\.databaseType\)/);
-  assert.match(treeItem, /<DdlViewDialog[\s\S]*?:database-type="ddlDatabaseType"[\s\S]*?v-model:open="showDdlDialog"/);
-  assert.match(app, /<DdlViewDialog[^>]*:database-type="queryEditorDdlDatabaseType"[^>]*\/>/);
+  assert.match(connectionTree, /<SidebarDdlViewDialog/);
+  assert.match(connectionTree, /:database-type="sidebarDdlDatabaseType"/);
+  assert.match(connectionTree, /v-model:open="sidebarDdlOpen"/);
+  assert.match(app, /<QueryEditorDdlViewDialog[^>]*:database-type="queryEditorDdlDatabaseType"[^>]*\/>/);
 });

@@ -10,7 +10,7 @@ import { useHistoryStore } from "@/stores/historyStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { assessProductionSql, productionContextForDatabase } from "@/lib/database/productionSafety";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
-import { DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN } from "@/lib/table/tableEditing";
+import { DBX_NEO4J_ELEMENT_ID_COLUMN, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 
 interface RowItem {
@@ -95,6 +95,8 @@ export interface UseDataGridEditorOptions {
   pageSize: Ref<number>;
   currentPage: Ref<number>;
   cacheKey?: ComputedRef<string | undefined>;
+  /** 保存成功后结果负载被原地修改时通知宿主，使缓存的字节估算失效。 */
+  onResultPayloadMutated?: () => void;
   emit: {
     (event: "reload", sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number): void;
   };
@@ -299,6 +301,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function touchPendingChanges() {
+    // Save errors describe the previous pending snapshot; edits, undo/redo, and rollback make them stale.
+    saveError.value = "";
     pendingChangesVersion.value++;
   }
 
@@ -478,12 +482,17 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   // --- Cell value coercion ---
-  function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number): CellValue {
+  interface ApplyCellValueOptions {
+    preserveEmptyString?: boolean;
+  }
+
+  function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number, options: ApplyCellValueOptions = {}): CellValue {
     return coerceDataGridCellValue({
       value,
       oldValue,
       databaseType: resolvedDatabaseType.value,
       columnInfo: tableColumnForGridColumn(columnIndex),
+      preserveEmptyString: options.preserveEmptyString,
     }) as CellValue;
   }
 
@@ -720,7 +729,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     await commitEditAndMaybeAutoSave(options);
   }
 
-  function applyCellValue(rowId: number, col: number, value: string | null) {
+  function applyCellValue(rowId: number, col: number, value: string | null, options: ApplyCellValueOptions = {}) {
     if (!canEditColumn(col)) return;
     const item = getRowItem(rowId);
     if (!item || item.isDeleted) return;
@@ -729,7 +738,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       ensureQuickEntryDraftRow();
       const oldVal = quickEntryDraftRow.value[col] ?? null;
       const nextDraftRow = [...quickEntryDraftRow.value];
-      nextDraftRow[col] = value === null ? null : coerceCellValue(value, oldVal, col);
+      nextDraftRow[col] = value === null ? null : coerceCellValue(value, oldVal, col, options);
       if (nextDraftRow[col] === oldVal) return;
       pushUndoSnapshot();
       quickEntryDraftRow.value = draftRowHasValue(nextDraftRow) ? nextDraftRow : emptyDraftRow();
@@ -743,7 +752,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       const row = newRows.value[item.newIndex];
       if (!row) return;
       const oldVal = row[col];
-      const newVal = value === null ? null : coerceCellValue(value, oldVal, col);
+      const newVal = value === null ? null : coerceCellValue(value, oldVal, col, options);
       if (newVal === oldVal) return;
       pushUndoSnapshot();
       row[col] = newVal;
@@ -759,7 +768,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const rowChanges = dirtyRows.value.get(item.sourceIndex);
     const hasPendingCellChange = rowChanges?.has(col) ?? false;
     const currentVal = hasPendingCellChange ? rowChanges!.get(col) : oldVal;
-    const newVal = value === null ? null : coerceCellValue(value, oldVal, col);
+    const newVal = value === null ? null : coerceCellValue(value, oldVal, col, options);
     if (newVal === currentVal) return;
     if (newVal !== oldVal) {
       pushUndoSnapshot();
@@ -862,7 +871,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function shouldClearClonedColumn(columnName: string, columnInfo: ColumnInfo | undefined): boolean {
-    if (resolvedDatabaseType.value === "oracle" && columnName.toUpperCase() === DBX_ROWID_COLUMN) return true;
+    if (usesSyntheticRowIdKey(resolvedDatabaseType.value, [columnName])) return true;
     if (resolvedDatabaseType.value === "neo4j" && columnName === DBX_NEO4J_ELEMENT_ID_COLUMN) return true;
     const extra = columnInfo?.extra ?? "";
     const columnDefault = columnInfo?.column_default ?? "";
@@ -1086,6 +1095,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     if (!tableMeta.value) return null;
     return {
       databaseType: resolvedDatabaseType.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId.value),
       tableMeta: tableMeta.value,
       columns: result.value.columns,
       sourceColumns: sourceColumns.value,
@@ -1206,6 +1216,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       snapshot.newRowRefs.forEach((row) => savingNewRows.delete(row));
       customHandler.applySavedChanges?.({ dirtyRows: snapshot.dirtyRows, columns: result.value.columns });
       applyDirtyRowsToResult(snapshot);
+      options.onResultPayloadMutated?.();
       clearSavedPendingChanges(snapshot);
       if (!hasPendingChanges.value) exitTransaction();
       clearPendingChangeHistory();
@@ -1267,7 +1278,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       rollbackStatements: rollbackStmts,
     });
 
-    if (useTransaction.value && hasBackendSaveTarget.value) {
+    if (useTransaction.value && stmts.length > 1 && hasBackendSaveTarget.value) {
       try {
         apiResult = await api.executeInTransaction(connectionId.value!, database.value ?? "", stmts, preparedSave?.executionSchema);
       } catch (e: any) {
@@ -1300,6 +1311,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       console.warn("[DBX] failed to record data grid history", e);
     }
     applyDirtyRowsToResult(snapshot);
+    options.onResultPayloadMutated?.();
     snapshot.newRowRefs.forEach((row) => savingNewRows.delete(row));
     clearSavedPendingChanges(snapshot);
     if (!hasPendingChanges.value) exitTransaction();

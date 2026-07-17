@@ -21,6 +21,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "confirmDangerousSqlExecution",
   "confirmUnsavedSqlClose",
   "appLayout",
+  "tabLayout",
   "showColumnCommentsInHeader",
   "showColumnTypesInHeader",
   "compactColumnHeaderActions",
@@ -47,10 +48,14 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "exportRowLimitEnabled",
   "exportRowLimit",
   "queryExportKeysetOptimizationEnabled",
+  "globalDateTimeDisplayFormat",
+  "globalDateTimeExportFormat",
+  "globalDateTimeImportFormat",
   "updateDownloadSource",
   "toolbarItems",
   "snippets",
   "sqlVariableSyntaxOverrides",
+  "continueOnErrorOnBatch",
 ] as const satisfies readonly (keyof EditorSettings)[];
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];

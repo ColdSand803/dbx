@@ -66,6 +66,14 @@ describe("requiresDatabaseSelection", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db")).toBe(false);
   });
 
+  it("allows MySQL SHOW DATABASES to run without a selected database", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SHOW DATABASES")).toBe(false);
+  });
+
+  it("allows MySQL SHOW VARIABLES without a selected database", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SHOW VARIABLES LIKE 'version%'")).toBe(false);
+  });
+
   it("allows MySQL CREATE SCHEMA with options to run without a selected database", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE SCHEMA `app-db` DEFAULT CHARACTER SET utf8mb4")).toBe(false);
   });
@@ -78,16 +86,20 @@ describe("requiresDatabaseSelection", () => {
     expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SET NAMES utf8mb4; DROP DATABASE IF EXISTS app_db; CREATE DATABASE app_db; USE app_db; INSERT INTO users VALUES (1)")).toBe(false);
   });
 
-  it("requires a database when MySQL batch statements never establish database context", () => {
-    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db; CREATE TABLE users(id INT)")).toBe(true);
+  it("lets MySQL report statement-specific database requirements", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db; CREATE TABLE users(id INT)")).toBe(false);
   });
 
-  it("requires a database when a USE statement is not a standalone database switch", () => {
-    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db; USE app_db SELECT 1; CREATE TABLE users(id INT)")).toBe(true);
+  it("lets MySQL reject malformed database switches", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "CREATE DATABASE app_db; USE app_db SELECT 1; CREATE TABLE users(id INT)")).toBe(false);
   });
 
-  it("still requires a database for ordinary MySQL queries", () => {
-    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), "SELECT * FROM users")).toBe(true);
+  it.each(["SELECT 1", "SELECT VERSION()", "SELECT * FROM mysql.user", "SELECT * FROM users"])("allows connection-level MySQL query: %s", (sql) => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mysql"), sql)).toBe(false);
+  });
+
+  it("still requires a database for non-MySQL multi-database connections", () => {
+    expect(requiresDatabaseSelection(queryTab(), connection("mssql"), "SELECT * FROM dbo.users")).toBe(true);
   });
 
   it("allows HANA with default database (empty string) to execute queries", () => {
@@ -165,6 +177,39 @@ describe("useSqlExecution", () => {
     const executedSql = executeCurrentSql.mock.calls[0]?.[0] ?? "";
     expect(executedSql).toContain("set @date_start = '2026-07-04 00:00:00'");
     expect(executedSql).toContain("where fp.create_at < @date_start");
+  });
+
+  it("sends Doris STRUCT DDL unchanged without opening the parameter dialog", async () => {
+    const sql = `
+      create table \`events\` (
+        \`field0\` int not null comment 'field 0',
+        \`field_list\` array<struct<field1:smallint, field2:int, field3:decimal(16,5), field4:varchar(255)>> comment 'field list'
+      )
+      engine = olap
+      properties ("replication_num" = "1");
+    `;
+    const activeTab = ref<QueryTab | undefined>(queryTab("analytics"));
+    const activeConnection = ref<ConnectionConfig | undefined>(connection("doris"));
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      if (activeTab.value) activeTab.value.result = { columns: ["ok"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
+    });
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    vi.spyOn(useConnectionStore(), "refreshObjectListTreeNode").mockResolvedValue(undefined);
+
+    const execution = useSqlExecution({
+      activeTab: computed(() => activeTab.value),
+      activeConnection: computed(() => activeConnection.value),
+      executableSql: computed(() => sql),
+      activeOutputView,
+    });
+
+    await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(execution.sqlParameterNames.value).toEqual([]);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, {});
   });
 
   it("records a later MySQL batch error and skips metadata refresh", async () => {

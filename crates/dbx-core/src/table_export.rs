@@ -7,10 +7,12 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::connection::MysqlMode;
-use crate::connection::{task_client_session_id, AppState, PoolKind};
+use crate::connection::{config_for_pool_key, task_client_session_id, AppState, PoolKind};
 use crate::csv_export::{escape_csv, format_csv, format_tsv, format_tsv_rows, value_to_csv_text};
 pub use crate::database_export::ExportStatus;
-use crate::database_export::{build_export_insert_statements, is_export_cancelled, BuildExportInsertStatementsOptions};
+use crate::database_export::{
+    build_export_insert_statements, is_export_cancelled, is_internal_export_column, BuildExportInsertStatementsOptions,
+};
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::models::connection::DatabaseType;
 use crate::transfer::{
@@ -54,6 +56,8 @@ pub struct TableExportRequest {
     pub batch_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_time_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,6 +89,37 @@ fn export_column_types(request: &TableExportRequest) -> Vec<String> {
         .iter()
         .map(|column_type| column_type.clone().unwrap_or_default())
         .collect()
+}
+
+fn resolve_requested_export_columns(
+    database_type: DatabaseType,
+    columns: &[String],
+    column_types: Option<&[Option<String>]>,
+    primary_keys: Option<&[String]>,
+) -> (Vec<String>, Vec<Option<String>>, Vec<String>) {
+    let mut resolved_columns = Vec::with_capacity(columns.len());
+    let mut resolved_column_types = column_types.map(|_| Vec::with_capacity(columns.len())).unwrap_or_default();
+
+    // Filter names and their index-aligned type metadata together so the
+    // fetched rows and later SQL literal formatting keep the same positions.
+    for (index, column) in columns.iter().enumerate() {
+        if is_internal_export_column(Some(database_type), column) {
+            continue;
+        }
+        resolved_columns.push(column.clone());
+        if let Some(column_types) = column_types {
+            resolved_column_types.push(column_types.get(index).cloned().unwrap_or(None));
+        }
+    }
+
+    let resolved_primary_keys = primary_keys
+        .unwrap_or_default()
+        .iter()
+        .filter(|column| !is_internal_export_column(Some(database_type), column))
+        .cloned()
+        .collect();
+
+    (resolved_columns, resolved_column_types, resolved_primary_keys)
 }
 
 fn write_json_row_object<W: Write>(writer: &mut W, columns: &[String], row: &[Value]) -> Result<(), String> {
@@ -251,6 +286,15 @@ async fn fetch_table_export_batch(
         *table_read_attempted = true;
         let sql = table_cursor_sql(request, db_type, col_names, primary_keys);
         let max_rows = request.row_limit.unwrap_or(i32::MAX as usize);
+        let timeout_secs = {
+            let configs = state.configs.read().await;
+            let query_timeout = config_for_pool_key(pool_key, &configs).map(|c| c.query_timeout_secs).unwrap_or(0);
+            if query_timeout == 0 {
+                None
+            } else {
+                Some(query_timeout)
+            }
+        };
         let params = AgentTableReadStartParams {
             sql,
             database: Some(request.database.clone()),
@@ -258,6 +302,7 @@ async fn fetch_table_export_batch(
             page_size: active_batch_size,
             max_rows,
             fetch_size: Some(active_batch_size),
+            timeout_secs,
         };
         let connections = state.connections.read().await;
         let Some(PoolKind::Agent(client)) = connections.get(pool_key) else {
@@ -483,7 +528,12 @@ async fn try_export_native_table_stream(
                 &cancelled,
                 cancel_token.clone(),
                 |row| {
-                    let row_csv = format_csv_rows(&[row.to_vec()]);
+                    let formatted = crate::temporal_format::format_temporal_export_row(
+                        row,
+                        column_types,
+                        request.date_time_format.as_deref(),
+                    );
+                    let row_csv = format_csv_rows(&[formatted]);
                     write!(file, "\n{row_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
                     rows_exported += 1;
                     if rows_exported % progress_interval == 0 {
@@ -522,7 +572,12 @@ async fn try_export_native_table_stream(
                 &cancelled,
                 cancel_token.clone(),
                 |row| {
-                    let row_tsv = format_tsv_rows(&[row.to_vec()]);
+                    let formatted = crate::temporal_format::format_temporal_export_row(
+                        row,
+                        column_types,
+                        request.date_time_format.as_deref(),
+                    );
+                    let row_tsv = format_tsv_rows(&[formatted]);
                     write!(file, "\n{row_tsv}").map_err(|e| format!("Failed to write TXT rows: {e}"))?;
                     rows_exported += 1;
                     if rows_exported % progress_interval == 0 {
@@ -545,14 +600,14 @@ async fn try_export_native_table_stream(
             result
         }
         "xlsx" => {
-            let column_types = export_column_types(request);
+            let xlsx_column_types = export_column_types(request);
             let xlsx_file =
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
             let mut writer = start_streaming_xlsx_workbook(
                 BufWriter::new(xlsx_file),
                 Some(&request.table_name),
                 col_names,
-                &column_types,
+                &xlsx_column_types,
             )?;
             let result = stream_native_table_rows(
                 state,
@@ -563,7 +618,12 @@ async fn try_export_native_table_stream(
                 &cancelled,
                 cancel_token.clone(),
                 |row| {
-                    writer.write_row(row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                    let formatted = crate::temporal_format::format_temporal_export_row(
+                        row,
+                        column_types,
+                        request.date_time_format.as_deref(),
+                    );
+                    writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     rows_exported += 1;
                     if rows_exported % progress_interval == 0 {
                         on_progress(TableExportProgress {
@@ -612,7 +672,12 @@ async fn try_export_native_table_stream(
                     if !is_first_row {
                         file.write_all(b",\n").map_err(|e| format!("Failed to write JSON: {e}"))?;
                     }
-                    write_json_row_object(&mut file, col_names, row)?;
+                    let formatted = crate::temporal_format::format_temporal_export_row(
+                        row,
+                        column_types,
+                        request.date_time_format.as_deref(),
+                    );
+                    write_json_row_object(&mut file, col_names, &formatted)?;
                     is_first_row = false;
                     rows_exported += 1;
                     if rows_exported % progress_interval == 0 {
@@ -651,7 +716,12 @@ async fn try_export_native_table_stream(
                 &cancelled,
                 cancel_token.clone(),
                 |row| {
-                    let rows_markdown = format_markdown_rows(&[row.to_vec()]);
+                    let formatted = crate::temporal_format::format_temporal_export_row(
+                        row,
+                        column_types,
+                        request.date_time_format.as_deref(),
+                    );
+                    let rows_markdown = format_markdown_rows(&[formatted]);
                     if !rows_markdown.is_empty() {
                         if wrote_rows {
                             file.write_all(b"\n").map_err(|e| format!("Failed to write Markdown: {e}"))?;
@@ -825,9 +895,13 @@ pub async fn export_table_data_core(
     // directly, which avoids expensive metadata round-trips on JDBC drivers.
     let requested_columns = request.columns.as_ref().filter(|columns| !columns.is_empty());
     let (col_names, column_types, column_extras, primary_keys) = if let Some(requested_columns) = requested_columns {
-        let primary_keys = request.primary_keys.clone().unwrap_or_default();
-        let column_types = request.column_types.clone().unwrap_or_default();
-        (requested_columns.clone(), column_types, Vec::new(), primary_keys)
+        let (col_names, column_types, primary_keys) = resolve_requested_export_columns(
+            db_type,
+            requested_columns,
+            request.column_types.as_deref(),
+            request.primary_keys.as_deref(),
+        );
+        (col_names, column_types, Vec::new(), primary_keys)
     } else {
         let columns = crate::schema::get_columns_core(
             state,
@@ -979,15 +1053,20 @@ pub async fn export_table_data_core(
                 if row_count == 0 {
                     break;
                 }
+                let formatted_rows = crate::temporal_format::format_temporal_export_rows(
+                    &result.rows,
+                    &column_types,
+                    request.date_time_format.as_deref(),
+                );
 
                 if is_first_batch {
                     // First batch: write header + rows via format_csv
-                    let csv_content = format_csv(&col_names, &result.rows);
+                    let csv_content = format_csv(&col_names, &formatted_rows);
                     file.write_all(csv_content.as_bytes()).map_err(|e| format!("Failed to write CSV: {e}"))?;
                     is_first_batch = false;
                 } else {
                     // Subsequent batches: write rows only (prepend newline for separation)
-                    let rows_csv = format_csv_rows(&result.rows);
+                    let rows_csv = format_csv_rows(&formatted_rows);
                     if !rows_csv.is_empty() {
                         write!(file, "\n{rows_csv}").map_err(|e| format!("Failed to write CSV rows: {e}"))?;
                     }
@@ -1061,13 +1140,18 @@ pub async fn export_table_data_core(
                 if row_count == 0 {
                     break;
                 }
+                let formatted_rows = crate::temporal_format::format_temporal_export_rows(
+                    &result.rows,
+                    &column_types,
+                    request.date_time_format.as_deref(),
+                );
 
                 if is_first_batch {
-                    let rows_tsv = format_tsv_rows(&result.rows);
+                    let rows_tsv = format_tsv_rows(&formatted_rows);
                     write!(file, "\n{rows_tsv}").map_err(|e| format!("Failed to write TXT rows: {e}"))?;
                     is_first_batch = false;
                 } else {
-                    let rows_tsv = format_tsv_rows(&result.rows);
+                    let rows_tsv = format_tsv_rows(&formatted_rows);
                     if !rows_tsv.is_empty() {
                         write!(file, "\n{rows_tsv}").map_err(|e| format!("Failed to write TXT rows: {e}"))?;
                     }
@@ -1098,7 +1182,7 @@ pub async fn export_table_data_core(
             }
         }
         "xlsx" => {
-            let column_types = export_column_types(request);
+            let xlsx_column_types = export_column_types(request);
             // Create a dedicated file handle for the streaming XLSX writer
             // instead of cloning the outer BufWriter's handle.  This avoids
             // sharing a file descriptor between two independent buffers.
@@ -1108,7 +1192,7 @@ pub async fn export_table_data_core(
                 BufWriter::new(xlsx_file),
                 Some(&request.table_name),
                 &col_names,
-                &column_types,
+                &xlsx_column_types,
             )?;
 
             loop {
@@ -1151,7 +1235,12 @@ pub async fn export_table_data_core(
                 }
 
                 for row in &result.rows {
-                    writer.write_row(row).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
+                    let formatted = crate::temporal_format::format_temporal_export_row(
+                        row,
+                        &column_types,
+                        request.date_time_format.as_deref(),
+                    );
+                    writer.write_row(&formatted).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                 }
                 rows_exported += row_count as u64;
 
@@ -1241,7 +1330,12 @@ pub async fn export_table_data_core(
                     if !is_first_row {
                         file.write_all(b",\n").map_err(|e| format!("Failed to write JSON: {e}"))?;
                     }
-                    write_json_row_object(&mut file, &col_names, row)?;
+                    let formatted = crate::temporal_format::format_temporal_export_row(
+                        row,
+                        &column_types,
+                        request.date_time_format.as_deref(),
+                    );
+                    write_json_row_object(&mut file, &col_names, &formatted)?;
                     is_first_row = false;
                 }
 
@@ -1313,7 +1407,12 @@ pub async fn export_table_data_core(
                     break;
                 }
 
-                let rows_markdown = format_markdown_rows(&result.rows);
+                let formatted_rows = crate::temporal_format::format_temporal_export_rows(
+                    &result.rows,
+                    &column_types,
+                    request.date_time_format.as_deref(),
+                );
+                let rows_markdown = format_markdown_rows(&formatted_rows);
                 if !rows_markdown.is_empty() {
                     if wrote_rows {
                         file.write_all(b"\n").map_err(|e| format!("Failed to write Markdown: {e}"))?;
@@ -1585,6 +1684,7 @@ mod tests {
             skip_count: false,
             batch_size: Some(500),
             row_limit: Some(1000),
+            date_time_format: None,
         };
 
         let sql = table_cursor_sql(
@@ -1601,6 +1701,67 @@ mod tests {
         assert!(!sql.contains("OFFSET"));
         assert!(!sql.contains("FETCH NEXT"));
         assert!(!sql.contains("ROWNUM"));
+    }
+
+    #[test]
+    fn oracle_requested_export_columns_omit_synthetic_rowid_and_keep_metadata_aligned() {
+        let columns = vec!["__DBX_ROWID".to_string(), "ID".to_string(), "NAME".to_string()];
+        let column_types = vec![Some("VARCHAR2".to_string()), Some("NUMBER".to_string()), Some("VARCHAR2".to_string())];
+        let primary_keys = vec!["__DBX_ROWID".to_string()];
+
+        let (columns, column_types, primary_keys) =
+            resolve_requested_export_columns(DatabaseType::Oracle, &columns, Some(&column_types), Some(&primary_keys));
+
+        assert_eq!(columns, vec!["ID", "NAME"]);
+        assert_eq!(column_types, vec![Some("NUMBER".to_string()), Some("VARCHAR2".to_string())]);
+        assert!(primary_keys.is_empty());
+
+        let request = TableExportRequest {
+            export_id: "export-rowid".to_string(),
+            connection_id: "conn-1".to_string(),
+            database: "ORCL".to_string(),
+            schema: Some("APP".to_string()),
+            table_name: "USERS".to_string(),
+            file_path: "users.sql".to_string(),
+            format: "sql".to_string(),
+            columns: None,
+            column_types: None,
+            primary_keys: None,
+            where_input: None,
+            order_by: None,
+            skip_count: false,
+            batch_size: Some(100),
+            row_limit: None,
+            date_time_format: None,
+        };
+        let sql = table_cursor_sql(&request, &DatabaseType::Oracle, &columns, &primary_keys);
+        assert_eq!(sql, "SELECT \"ID\", \"NAME\" FROM \"APP\".\"USERS\"");
+
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: request.schema,
+            table_name: Some(request.table_name),
+            qualified_table_name: None,
+            columns,
+            column_types,
+            column_extras: Vec::new(),
+            rows: vec![vec![json!(1), json!("Ada")]],
+            batch_size: Some(100),
+        })
+        .unwrap();
+        assert_eq!(statements, vec!["INSERT INTO \"APP\".\"USERS\" (\"ID\", \"NAME\") VALUES (1, 'Ada');"]);
+    }
+
+    #[test]
+    fn requested_export_columns_preserve_regular_oracle_and_non_oracle_columns() {
+        let oracle_columns = vec!["ROW_ID".to_string(), "NAME".to_string()];
+        let (resolved_oracle, _, _) =
+            resolve_requested_export_columns(DatabaseType::Oracle, &oracle_columns, None, None);
+        assert_eq!(resolved_oracle, oracle_columns);
+
+        let mysql_columns = vec!["__DBX_ROWID".to_string(), "name".to_string()];
+        let (resolved_mysql, _, _) = resolve_requested_export_columns(DatabaseType::Mysql, &mysql_columns, None, None);
+        assert_eq!(resolved_mysql, mysql_columns);
     }
 
     #[test]

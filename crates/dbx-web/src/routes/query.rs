@@ -23,6 +23,8 @@ pub struct ExecuteQueryRequest {
     pub client_session_id: Option<String>,
     pub timeout_secs: Option<u64>,
     pub use_transaction: Option<bool>,
+    pub continue_on_error: Option<bool>,
+    pub execution_mode: Option<dbx_core::query::QueryExecutionMode>,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +320,8 @@ pub async fn execute_query(
     );
     let cancel_token = registered.token();
 
+    tracing::debug!(connection_id = %req.connection_id, "execute_query");
+
     let result = dbx_core::query::execute_sql_statement_with_options(
         &state.app,
         &req.connection_id,
@@ -334,6 +338,7 @@ pub async fn execute_query(
             timeout_secs: req.timeout_secs,
             execution_id: Some(execution_id),
             use_transaction: req.use_transaction,
+            execution_mode: req.execution_mode.unwrap_or_default(),
             ..Default::default()
         },
     )
@@ -356,6 +361,8 @@ pub async fn execute_multi(
     );
     let cancel_token = registered.token();
 
+    tracing::debug!(connection_id = %req.connection_id, "execute_multi");
+
     let result = dbx_core::query::execute_multi_core_with_options_for_client(
         &state.app,
         &req.connection_id,
@@ -372,7 +379,8 @@ pub async fn execute_multi(
             timeout_secs: req.timeout_secs,
             execution_id: Some(execution_id),
             use_transaction: req.use_transaction,
-            ..Default::default()
+            continue_on_error: req.continue_on_error.unwrap_or(false),
+            execution_mode: req.execution_mode.unwrap_or_default(),
         },
     )
     .await
@@ -386,6 +394,7 @@ pub async fn execute_batch(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteBatchRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    tracing::debug!(connection_id = %req.connection_id, "execute_batch");
     let result = dbx_core::query::execute_statements(
         &state.app,
         &req.connection_id,
@@ -443,6 +452,7 @@ pub async fn execute_script(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteQueryRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    tracing::debug!(connection_id = %req.connection_id, "execute_script");
     let db_type = {
         let configs = state.app.configs.read().await;
         configs.get(&req.connection_id).map(|config| config.db_type)
@@ -468,6 +478,7 @@ pub async fn execute_in_transaction(
     State(state): State<Arc<WebState>>,
     Json(req): Json<ExecuteBatchRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    tracing::debug!(connection_id = %req.connection_id, "execute_in_transaction");
     let result = dbx_core::query::execute_statements_in_transaction(
         &state.app,
         &req.connection_id,

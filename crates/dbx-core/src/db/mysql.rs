@@ -12,7 +12,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::models::connection::DatabaseType;
+use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
@@ -101,6 +101,55 @@ fn first_nonempty_str_by_name(row: &mysql_async::Row, names: &[&str]) -> String 
         }
     }
     String::new()
+}
+
+fn nonblank(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+async fn query_first_nonblank_string(conn: &mut mysql_async::Conn, sql: &str) -> Option<String> {
+    match conn.query_first::<String, _>(sql).await {
+        Ok(Some(value)) => nonblank(value),
+        Ok(None) => None,
+        Err(error) => {
+            log::debug!("Failed to read optional MySQL database information with `{sql}`: {error}");
+            None
+        }
+    }
+}
+
+pub async fn database_connection_info(
+    pool: &MySqlPool,
+    product_name: impl Into<String>,
+) -> Result<DatabaseConnectionInfo, String> {
+    let product_name = nonblank(product_name.into()).unwrap_or_else(|| "MySQL".to_string());
+    let mut conn = get_conn_with_health_check(pool).await?;
+
+    Ok(DatabaseConnectionInfo {
+        product_name: Some(product_name),
+        product_version: query_first_nonblank_string(&mut conn, "SELECT VERSION()").await,
+        current_database: query_first_nonblank_string(&mut conn, "SELECT COALESCE(DATABASE(), '')").await,
+        server_comment: query_first_nonblank_string(&mut conn, "SELECT @@version_comment").await,
+        server_charset: query_first_nonblank_string(&mut conn, "SELECT @@character_set_server").await,
+        server_collation: query_first_nonblank_string(&mut conn, "SELECT @@collation_server").await,
+        ..DatabaseConnectionInfo::default()
+    })
+}
+
+pub fn protocol_product_name(config: &ConnectionConfig) -> String {
+    config.driver_label.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string).unwrap_or_else(
+        || match config.db_type {
+            DatabaseType::Doris => "Doris".to_string(),
+            DatabaseType::StarRocks => "StarRocks".to_string(),
+            DatabaseType::ManticoreSearch => "Manticore Search".to_string(),
+            _ => "MySQL".to_string(),
+        },
+    )
 }
 
 fn get_opt_metadata_string(row: &mysql_async::Row, name: &str) -> Option<String> {
@@ -236,8 +285,16 @@ fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_js
 /// Map a MySQL column to a user-facing type name for the result-grid header.
 /// Returns the bare lowercase type name (no length/precision/signedness), which
 /// is enough for display; unknown variants fall back to a lowercased debug name.
-pub(crate) fn mysql_column_type_name(ty: ColumnType) -> String {
+///
+/// MySQL's wire protocol uses the same `MYSQL_TYPE_*BLOB` codes for TEXT and BLOB
+/// families. Binary charset (63) means BLOB; any other charset means TEXT. Value
+/// decoding already follows that rule — the header type must match, or TEXT
+/// columns flash as `blob` until table metadata arrives.
+pub(crate) fn mysql_column_type_name(column: &mysql_async::Column) -> String {
     use mysql_async::consts::ColumnType::*;
+    let ty = column.column_type();
+    let flags = column.flags();
+    let binary = is_mysql_binary_charset(column);
     match ty {
         MYSQL_TYPE_TINY => "tinyint",
         MYSQL_TYPE_SHORT => "smallint",
@@ -256,12 +313,54 @@ pub(crate) fn mysql_column_type_name(ty: ColumnType) -> String {
         MYSQL_TYPE_JSON => "json",
         MYSQL_TYPE_ENUM => "enum",
         MYSQL_TYPE_SET => "set",
-        MYSQL_TYPE_TINY_BLOB => "tinyblob",
-        MYSQL_TYPE_MEDIUM_BLOB => "mediumblob",
-        MYSQL_TYPE_LONG_BLOB => "longblob",
-        MYSQL_TYPE_BLOB => "blob",
-        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => "varchar",
-        MYSQL_TYPE_STRING => "char",
+        MYSQL_TYPE_TINY_BLOB => {
+            if binary {
+                "tinyblob"
+            } else {
+                "tinytext"
+            }
+        }
+        MYSQL_TYPE_MEDIUM_BLOB => {
+            if binary {
+                "mediumblob"
+            } else {
+                "mediumtext"
+            }
+        }
+        MYSQL_TYPE_LONG_BLOB => {
+            if binary {
+                "longblob"
+            } else {
+                "longtext"
+            }
+        }
+        MYSQL_TYPE_BLOB => {
+            if binary {
+                "blob"
+            } else {
+                "text"
+            }
+        }
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => {
+            if binary {
+                "varbinary"
+            } else {
+                "varchar"
+            }
+        }
+        MYSQL_TYPE_STRING => {
+            // MySQL reports ENUM/SET result columns as STRING plus a flag,
+            // rather than using the dedicated protocol type codes.
+            if flags.contains(mysql_async::consts::ColumnFlags::ENUM_FLAG) {
+                "enum"
+            } else if flags.contains(mysql_async::consts::ColumnFlags::SET_FLAG) {
+                "set"
+            } else if binary {
+                "binary"
+            } else {
+                "char"
+            }
+        }
         MYSQL_TYPE_GEOMETRY => "geometry",
         MYSQL_TYPE_NULL => "null",
         other => return format!("{:?}", other).to_lowercase(),
@@ -597,9 +696,14 @@ enum MySqlSetupMode {
     Compatible,
 }
 
+const MYSQL_GROUP_CONCAT_MAX_LEN: u64 = 1_048_576;
+
 impl MySqlSetupMode {
-    fn set_group_concat_max_len(self) -> bool {
-        self == Self::Standard
+    fn group_concat_max_len_query(self) -> Option<String> {
+        match self {
+            Self::Standard => Some(format!("SET SESSION group_concat_max_len = {MYSQL_GROUP_CONCAT_MAX_LEN}")),
+            Self::Compatible => None,
+        }
     }
 }
 
@@ -617,12 +721,10 @@ async fn verify_pool_connection_with_setup_fallback(
     match verify_pool_connection(&pool, timeout).await {
         Ok(()) => Ok(pool),
         Err(err) => {
-            let Some(fallback_mode) = mysql_setup_mode_retry_without_group_concat(setup_mode, &err) else {
+            let Some(fallback_mode) = mysql_group_concat_setup_fallback_mode(setup_mode, &err) else {
                 return Err(err);
             };
-            log::info!(
-                "MySQL server rejected optional group_concat_max_len setup; retrying without that session setting"
-            );
+            log::info!("MySQL server rejected group_concat_max_len setup syntax; retrying with {fallback_mode:?} mode");
             let fallback_pool = create_pool(
                 url,
                 ca_cert_path,
@@ -637,11 +739,21 @@ async fn verify_pool_connection_with_setup_fallback(
     }
 }
 
-fn mysql_setup_mode_retry_without_group_concat(setup_mode: MySqlSetupMode, error: &str) -> Option<MySqlSetupMode> {
-    // group_concat_max_len improves real MySQL metadata reads, but some MySQL-compatible proxies reject the variable.
-    if setup_mode.set_group_concat_max_len() && mysql_error_should_retry_without_group_concat_max_len(error) {
+fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &str) -> Option<MySqlSetupMode> {
+    if setup_mode != MySqlSetupMode::Standard {
+        return None;
+    }
+
+    let lower = error.to_ascii_lowercase();
+    let setup_query_rejected =
+        lower.contains("1193") || lower.contains("unknown system variable") || lower.contains("syntax error");
+    let sphinxql_setup_query_rejected = lower.contains("sphinxql")
+        && lower.contains("only 0 and 1 could be used as boolean values")
+        && lower.contains(&format!("near '{MYSQL_GROUP_CONCAT_MAX_LEN}'"));
+    if (lower.contains("group_concat_max_len") && setup_query_rejected) || sphinxql_setup_query_rejected {
         return Some(MySqlSetupMode::Compatible);
     }
+
     None
 }
 
@@ -836,8 +948,8 @@ fn mysql_setup_queries_for_database_with_mode(
     // MySQL defaults group_concat_max_len to 1024, which silently truncates
     // GROUP_CONCAT results. Skip it for MySQL protocol-compatible databases
     // such as old StarRocks versions that reject unknown MySQL variables.
-    if setup_mode.set_group_concat_max_len() {
-        queries.push("SET @@group_concat_max_len = 1048576".to_string());
+    if let Some(query) = setup_mode.group_concat_max_len_query() {
+        queries.push(query);
     }
     // StarRocks/Doris expose external storage (Paimon, Hive, ...) through a
     // catalog. `SET catalog` must run *before* `USE <database>` (the database
@@ -1085,11 +1197,6 @@ fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
         || lower.contains("buf doesn't have enough data")
         || lower.contains("prepared statement protocol")
         || lower.contains("this command is not supported in the prepared statement protocol yet")
-}
-
-fn mysql_error_should_retry_without_group_concat_max_len(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("group_concat_max_len") && (lower.contains("1193") || lower.contains("unknown system variable"))
 }
 
 fn ssl_fallback_url(url: &str) -> Option<String> {
@@ -2726,8 +2833,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
         });
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
 
     if should_collect_text_result_set(sql, row_limit, max_rows) {
         let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
@@ -2805,8 +2911,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 ) -> Result<QueryResult, String> {
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
     let mut stream = result
@@ -2912,8 +3017,7 @@ async fn stream_query_result_text(
         return Ok(0);
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
     on_item(MySqlQueryStreamItem::Columns { columns, column_types })?;
 
     let mut stream = result
@@ -2951,8 +3055,7 @@ async fn stream_query_result_prepared(
     if columns.is_empty() {
         return Ok(0);
     }
-    let column_types: Vec<String> =
-        result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
+    let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
     on_item(MySqlQueryStreamItem::Columns { columns, column_types })?;
 
     let mut stream = result
@@ -3806,16 +3909,74 @@ mod tests {
     #[test]
     fn mysql_column_type_names_map_to_friendly_names() {
         use mysql_async::consts::ColumnType::*;
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_TINY), "tinyint");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONG), "int");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_LONGLONG), "bigint");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_NEWDECIMAL), "decimal");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VARCHAR), "varchar");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_VAR_STRING), "varchar");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_STRING), "char");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_DATETIME), "datetime");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_JSON), "json");
-        assert_eq!(mysql_column_type_name(MYSQL_TYPE_BLOB), "blob");
+        let utf8 = 45u16;
+        let binary = 63u16;
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_TINY, utf8, ColumnFlags::empty(), 4)),
+            "tinyint"
+        );
+        assert_eq!(mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_LONG, utf8, ColumnFlags::empty(), 11)), "int");
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_LONGLONG, utf8, ColumnFlags::empty(), 20)),
+            "bigint"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_NEWDECIMAL, utf8, ColumnFlags::empty(), 10)),
+            "decimal"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_VARCHAR, utf8, ColumnFlags::empty(), 255)),
+            "varchar"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_VAR_STRING, utf8, ColumnFlags::empty(), 255)),
+            "varchar"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, utf8, ColumnFlags::empty(), 16)),
+            "char"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, utf8, ColumnFlags::ENUM_FLAG, 16)),
+            "enum"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, utf8, ColumnFlags::SET_FLAG, 16)),
+            "set"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_DATETIME, utf8, ColumnFlags::empty(), 19)),
+            "datetime"
+        );
+        assert_eq!(mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_JSON, utf8, ColumnFlags::empty(), 0)), "json");
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_BLOB, binary, ColumnFlags::BLOB_FLAG, 65_535)),
+            "blob"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_BLOB, utf8, ColumnFlags::empty(), 65_535)),
+            "text"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_TINY_BLOB, utf8, ColumnFlags::empty(), 255)),
+            "tinytext"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_MEDIUM_BLOB, utf8, ColumnFlags::empty(), 16_777_215)),
+            "mediumtext"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_LONG_BLOB, utf8, ColumnFlags::empty(), 4_294_967_295)),
+            "longtext"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_VAR_STRING, binary, ColumnFlags::BINARY_FLAG, 16)),
+            "varbinary"
+        );
+        assert_eq!(
+            mysql_column_type_name(&mysql_test_column(MYSQL_TYPE_STRING, binary, ColumnFlags::BINARY_FLAG, 16)),
+            "binary"
+        );
     }
 
     #[test]
@@ -4480,22 +4641,62 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_group_concat_setup_error_retries_without_session_variable() {
         let error = "MySQL connection failed: Server error: `ERROR HY000 (1193): Unknown system variable,stmt:SET @@group_concat_max_len = 1048576'";
 
-        assert!(mysql_error_should_retry_without_group_concat_max_len(error));
         assert_eq!(
-            mysql_setup_mode_retry_without_group_concat(MySqlSetupMode::Standard, error),
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
             Some(MySqlSetupMode::Compatible)
         );
     }
 
     #[test]
-    fn mysql_group_concat_setup_retry_is_narrow() {
-        assert!(!mysql_error_should_retry_without_group_concat_max_len(
-            "MySQL connection failed: Server error: `ERROR HY000 (1193): Unknown system variable,stmt:SET @@sql_mode = ANSI'"
-        ));
+    fn mysql_cnch_group_concat_syntax_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR HY000 (1105): unknown error: Error 62 (HY000): Code: 62, e.displayText() = DB::Exception: host = cnch-server-2: Syntax error: failed at position 13 ('group_concat_max_len'): group_concat_max_len = 1048576. Expected one of: Dot, token, Equals SQLSTATE: 42000 (version 21.8.7.1)'";
+
         assert_eq!(
-            mysql_setup_mode_retry_without_group_concat(
-                MySqlSetupMode::Compatible,
-                "Server error: ERROR HY000 (1193): Unknown system variable,stmt:SET @@group_concat_max_len = 1048576"
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_sphinxql_group_concat_boolean_error_retries_without_session_variable() {
+        let error = "MySQL connection failed: Server error: `ERROR 42000 (1064): sphinxql: only 0 and 1 could be used as boolean values near '1048576'`";
+
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+            Some(MySqlSetupMode::Compatible)
+        );
+    }
+
+    #[test]
+    fn mysql_sphinxql_boolean_error_retry_stays_scoped_to_group_concat_setup() {
+        for error in [
+            "Server error: sphinxql: only 0 and 1 could be used as boolean values near '42'",
+            "Server error: only 0 and 1 could be used as boolean values near '1048576'",
+        ] {
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None);
+        }
+    }
+
+    #[test]
+    fn mysql_proxy_parse_tablename_1105_does_not_disable_group_concat() {
+        let error = "MySQL connection failed: Server error: `ERROR 07000 (1105): SQL操作失败 (operate fail ) ：解析表名出错 ( parse tablename error ) '";
+
+        assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error), None);
+    }
+
+    #[test]
+    fn mysql_group_concat_setup_retry_is_narrow() {
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(
+                MySqlSetupMode::Standard,
+                "MySQL connection failed: Server error: `ERROR HY000 (1193): Unknown system variable,stmt:SET @@sql_mode = ANSI'",
+            ),
+            None
+        );
+        assert_eq!(
+            mysql_group_concat_setup_fallback_mode(
+                MySqlSetupMode::Standard,
+                "MySQL connection failed: Server error: `ERROR 07000 (1105): SQL操作失败 (operate fail)'",
             ),
             None
         );
@@ -4505,14 +4706,14 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_select_requested_database_before_session_init() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["USE `app`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
+        assert_eq!(queries, vec!["USE `app`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
     }
 
     #[test]
     fn mysql_setup_queries_skip_use_when_database_missing() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
+        assert_eq!(queries, vec!["SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
     }
 
     #[test]
@@ -4550,7 +4751,17 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_decode_database_name_from_url() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/db%2Fname?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["USE `db/name`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
+        assert_eq!(queries, vec!["USE `db/name`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+    }
+
+    #[test]
+    fn mysql_setup_queries_preserve_database_identifier_whitespace() {
+        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/%20analytics%20?charset=utf8mb4", &[]);
+
+        assert_eq!(
+            queries,
+            vec!["USE ` analytics `", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+        );
     }
 
     #[test]
@@ -4561,7 +4772,10 @@ UNIQUE KEY(`tenant_id`, `name``part`)
             &[],
         );
 
-        assert_eq!(queries, vec!["USE `app``proxy`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]);
+        assert_eq!(
+            queries,
+            vec!["USE `app``proxy`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+        );
     }
 
     #[test]
@@ -4745,7 +4959,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_default_to_utf8mb4() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
         );
     }
 
@@ -4753,11 +4967,11 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_use_safe_custom_charset() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?ssl-mode=preferred&charset=gbk", &[]),
-            vec!["USE `db`", "SET NAMES gbk", "SET @@group_concat_max_len = 1048576"]
+            vec!["USE `db`", "SET NAMES gbk", "SET SESSION group_concat_max_len = 1048576"]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4;DROP TABLE users", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
         );
     }
 
@@ -4770,7 +4984,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
             vec![
                 "USE `db`",
                 "SET NAMES utf8mb4",
-                "SET @@group_concat_max_len = 1048576",
+                "SET SESSION group_concat_max_len = 1048576",
                 "SET ob_query_timeout = 30000000"
             ]
         );
@@ -4780,7 +4994,12 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_apply_explicit_time_zone() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&charset=utf8mb4", &[]),
-            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET time_zone = '+08:00'",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = 1048576"
+            ]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time-zone=Asia%2FShanghai", &[]),
@@ -4788,7 +5007,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
                 "USE `db`",
                 "SET time_zone = 'Asia/Shanghai'",
                 "SET NAMES utf8mb4",
-                "SET @@group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = 1048576"
             ]
         );
     }
@@ -4797,11 +5016,21 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_apply_jdbc_time_zone_aliases() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?serverTimezone=GMT%2B8", &[]),
-            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET time_zone = '+08:00'",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = 1048576"
+            ]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?connectionTimeZone=UTC", &[]),
-            vec!["USE `db`", "SET time_zone = '+00:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET time_zone = '+00:00'",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = 1048576"
+            ]
         );
     }
 
@@ -4813,12 +5042,17 @@ UNIQUE KEY(`tenant_id`, `name``part`)
                 "USE `db`",
                 "SET time_zone = 'Asia/Shanghai'",
                 "SET NAMES utf8mb4",
-                "SET @@group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = 1048576"
             ]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00&loc=UTC", &[]),
-            vec!["USE `db`", "SET time_zone = '+08:00'", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET time_zone = '+08:00'",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = 1048576"
+            ]
         );
     }
 
@@ -4826,7 +5060,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_ignore_unsafe_time_zone_values() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00%27%3BDROP%20TABLE%20users", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
         );
     }
 
@@ -4839,7 +5073,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
             vec![
                 "USE `clip`",
                 "SET NAMES utf8mb4",
-                "SET @@group_concat_max_len = 1048576",
+                "SET SESSION group_concat_max_len = 1048576",
                 "SET catalog = `paimon_catalog`"
             ]
         );
@@ -4849,7 +5083,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_switch_catalog_without_database() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/?catalog=paimon_catalog", &[]),
-            vec!["SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576", "SET catalog = `paimon_catalog`"]
+            vec!["SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576", "SET catalog = `paimon_catalog`"]
         );
     }
 
@@ -4857,7 +5091,12 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_decodes_catalog_parameter() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?catalog=my%5Fcatalog", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576", "SET catalog = `my_catalog`"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = 1048576",
+                "SET catalog = `my_catalog`"
+            ]
         );
     }
 
@@ -4865,7 +5104,7 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_setup_queries_omits_catalog_when_absent() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET @@group_concat_max_len = 1048576"]
+            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
         );
     }
 

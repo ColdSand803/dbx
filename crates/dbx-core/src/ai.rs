@@ -8,6 +8,7 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{Notify, RwLock};
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Stream cancel registry
@@ -60,7 +61,26 @@ pub enum AiProvider {
     OpenaiCompatible,
     #[serde(rename = "codex-cli")]
     CodexCli,
+    #[serde(rename = "claude-code-cli")]
+    ClaudeCodeCli,
     Custom,
+}
+
+impl AiProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AiProvider::Claude => "claude",
+            AiProvider::Openai => "openai",
+            AiProvider::Gemini => "gemini",
+            AiProvider::Deepseek => "deepseek",
+            AiProvider::Qwen => "qwen",
+            AiProvider::Ollama => "ollama",
+            AiProvider::OpenaiCompatible => "openai-compatible",
+            AiProvider::ClaudeCodeCli => "claude-code-cli",
+            AiProvider::CodexCli => "codex-cli",
+            AiProvider::Custom => "custom",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -90,6 +110,8 @@ pub enum AiReasoningLevel {
     Low,
     Medium,
     High,
+    Xhigh,
+    Max,
 }
 
 impl AiReasoningLevel {
@@ -100,8 +122,72 @@ impl AiReasoningLevel {
             AiReasoningLevel::Low => Some("low"),
             AiReasoningLevel::Medium => Some("medium"),
             AiReasoningLevel::High => Some("high"),
+            AiReasoningLevel::Xhigh | AiReasoningLevel::Max => None,
         }
     }
+
+    pub fn as_claude_code_effort(&self) -> Option<&'static str> {
+        match self {
+            AiReasoningLevel::Default | AiReasoningLevel::Minimal => None,
+            AiReasoningLevel::Low => Some("low"),
+            AiReasoningLevel::Medium => Some("medium"),
+            AiReasoningLevel::High => Some("high"),
+            AiReasoningLevel::Xhigh => Some("xhigh"),
+            AiReasoningLevel::Max => Some("max"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum AiEffortLevel {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl std::str::FromStr for AiEffortLevel {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiConfigItem {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(flatten)]
+    pub config: AiConfig,
+}
+
+impl AiConfigItem {
+    pub fn new_id() -> String {
+        Uuid::new_v4().to_string()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiModelListItem {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_effort_levels: Vec<AiEffortLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +202,8 @@ pub struct AiConfig {
     pub endpoint: String,
     #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub models: Vec<AiModelListItem>,
     #[serde(default)]
     pub api_style: AiApiStyle,
     #[serde(default)]
@@ -132,6 +220,10 @@ pub struct AiConfig {
     pub codex_cli_path: Option<String>,
     #[serde(default)]
     pub codex_cli_env: HashMap<String, String>,
+    #[serde(default)]
+    pub claude_code_cli_path: Option<String>,
+    #[serde(default)]
+    pub claude_code_cli_env: HashMap<String, String>,
 }
 
 fn default_enable_thinking() -> bool {
@@ -229,6 +321,14 @@ pub struct AiModelInfo {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_effort_levels: Vec<AiEffortLevel>,
+}
+
+impl AiModelInfo {
+    pub fn new(id: impl Into<String>, display_name: Option<String>) -> Self {
+        Self { id: id.into(), display_name, supported_effort_levels: Vec::new() }
+    }
 }
 
 /// Result of an AI connection test (mirrors CC-Switch's StreamCheckResult).
@@ -314,7 +414,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
                 format!("{base}/chat/completions")
             }
         }
-        AiProvider::Claude | AiProvider::CodexCli | AiProvider::Gemini => unreachable!(),
+        AiProvider::Claude | AiProvider::CodexCli | AiProvider::ClaudeCodeCli | AiProvider::Gemini => unreachable!(),
     }
 }
 
@@ -530,6 +630,12 @@ fn apply_chat_completion_thinking_toggle(body: &mut serde_json::Value, config: &
         return;
     }
 
+    if is_openai_api_config(config) {
+        // `extra_body.chat_template_kwargs` is a third-party compatibility extension,
+        // not an OpenAI API parameter. OpenAI models use their native defaults here.
+        return;
+    }
+
     if matches!(config.provider, AiProvider::Ollama) {
         // Ollama's OpenAI-compatible API uses reasoning_effort instead of
         // forwarding provider-specific chat template arguments.
@@ -696,7 +802,7 @@ fn emit_responses_function_call_item(
 // ---------------------------------------------------------------------------
 
 fn validate_config(config: &AiConfig) -> Result<(), String> {
-    if matches!(config.provider, AiProvider::CodexCli) {
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
         return Ok(());
     }
     if !matches!(config.provider, AiProvider::Ollama) && config.api_key.trim().is_empty() {
@@ -712,7 +818,7 @@ fn validate_config(config: &AiConfig) -> Result<(), String> {
 }
 
 fn validate_model_list_config(config: &AiConfig) -> Result<(), String> {
-    if matches!(config.provider, AiProvider::CodexCli) {
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
         return Ok(());
     }
     if !matches!(config.provider, AiProvider::Ollama) && config.api_key.trim().is_empty() {
@@ -804,7 +910,7 @@ fn parse_model_list_response(data: &serde_json::Value) -> Result<Vec<AiModelInfo
             .filter(|name| !name.trim().is_empty() && *name != id)
             .map(ToString::to_string);
 
-        models.push(AiModelInfo { id: id.to_string(), display_name });
+        models.push(AiModelInfo::new(id, display_name));
     }
 
     Ok(models)
@@ -851,6 +957,9 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
     if matches!(config.provider, AiProvider::CodexCli) {
         return crate::ai_codex_cli::list_codex_models(config).await;
     }
+    if matches!(config.provider, AiProvider::ClaudeCodeCli) {
+        return crate::ai_claude_code_cli::list_claude_code_models(config).await;
+    }
     validate_model_list_config(config)?;
 
     let client = build_ai_http_client(config, 30)?;
@@ -869,7 +978,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
                 list_openai_compatible_models(&client, config).await
             }
         }
-        AiProvider::CodexCli => unreachable!(),
+        AiProvider::CodexCli | AiProvider::ClaudeCodeCli => unreachable!(),
         AiProvider::Gemini => {
             Err("Model listing is only supported for OpenAI-compatible and Claude providers".to_string())
         }
@@ -1083,6 +1192,9 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     if matches!(config.provider, AiProvider::CodexCli) {
         return crate::ai_codex_cli::test_codex_connection(config).await;
     }
+    if matches!(config.provider, AiProvider::ClaudeCodeCli) {
+        return crate::ai_claude_code_cli::test_claude_code_connection(config).await;
+    }
     validate_config(config)?;
 
     let client = build_ai_http_client(config, 15)?;
@@ -1258,8 +1370,8 @@ fn classify_error(msg: &str) -> &'static str {
 pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
     validate_config(&request.config)?;
 
-    if matches!(request.config.provider, AiProvider::CodexCli) {
-        return Err("Codex CLI provider is only supported in DBX AI agent mode".to_string());
+    if matches!(request.config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+        return Err("CLI providers are only supported in DBX AI agent mode".to_string());
     }
 
     let client = build_ai_http_client(&request.config, 60)?;
@@ -1267,7 +1379,7 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
     match request.config.provider {
         AiProvider::Claude => call_claude(&client, request.clone()).await,
         AiProvider::Gemini => call_gemini(&client, request.clone()).await,
-        AiProvider::CodexCli => unreachable!(),
+        AiProvider::CodexCli | AiProvider::ClaudeCodeCli => unreachable!(),
         AiProvider::Openai
         | AiProvider::Deepseek
         | AiProvider::Qwen
@@ -1303,8 +1415,8 @@ pub async fn stream(
 ) -> Result<(), String> {
     validate_config(&request.config)?;
 
-    if matches!(request.config.provider, AiProvider::CodexCli) {
-        return Err("Codex CLI provider is only supported in DBX AI agent mode".to_string());
+    if matches!(request.config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+        return Err("CLI providers are only supported in DBX AI agent mode".to_string());
     }
 
     let stream_timeout = if request.config.enable_thinking { 600 } else { 120 };
@@ -1313,7 +1425,7 @@ pub async fn stream(
     match request.config.provider {
         AiProvider::Claude => stream_claude(&client, session_id, request, cancelled, &on_chunk).await,
         AiProvider::Gemini => stream_gemini(&client, session_id, request, cancelled, &on_chunk).await,
-        AiProvider::CodexCli => unreachable!(),
+        AiProvider::CodexCli | AiProvider::ClaudeCodeCli => unreachable!(),
         AiProvider::Openai
         | AiProvider::Deepseek
         | AiProvider::Qwen
@@ -2372,6 +2484,9 @@ pub async fn stream_with_tools(
     on_chunk: impl Fn(AiStreamChunk),
 ) -> Result<(Vec<crate::agent_events::ToolCall>, Option<TokenUsage>), String> {
     validate_config(config)?;
+    if matches!(config.provider, AiProvider::CodexCli | AiProvider::ClaudeCodeCli) {
+        return Err("CLI providers are only supported through the DBX AI agent loop".to_string());
+    }
 
     let stream_timeout = if config.enable_thinking { 600 } else { 120 };
     let client = build_ai_http_client(config, stream_timeout)?;
@@ -2556,6 +2671,8 @@ mod tests {
         assert_eq!(config.proxy_url, "");
         assert!(config.enable_thinking);
         assert_eq!(config.auth_method, AiAuthMethod::ApiKey);
+        assert!(config.claude_code_cli_path.is_none());
+        assert!(config.claude_code_cli_env.is_empty());
         assert!(config.codex_cli_env.is_empty());
     }
 
@@ -2567,6 +2684,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
             model: "gpt-4o".to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: true,
             proxy_url: "not a proxy url".to_string(),
@@ -2575,6 +2693,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
 
         let err = build_ai_http_client(&config, 1).unwrap_err();
@@ -2590,6 +2710,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
             model: "gpt-4o".to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: true,
             proxy_url: "127.0.0.1:7890".to_string(),
@@ -2598,6 +2719,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -2611,6 +2734,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: "http://127.0.0.1:3456/v1".to_string(),
             model: "gpt-4o".to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: true,
             proxy_url: "not a proxy url".to_string(),
@@ -2619,6 +2743,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
 
         build_ai_http_client(&config, 1).unwrap();
@@ -2632,6 +2758,7 @@ mod tests {
             auth_method: AiAuthMethod::ApiKey,
             endpoint: "https://generativelanguage.googleapis.com".to_string(),
             model: "gemini-1.5-pro".to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -2640,6 +2767,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
 
         assert_eq!(
@@ -2657,6 +2786,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: "http://localhost:11434/v1".to_string(),
             model: "llama3.1".to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -2665,6 +2795,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
 
         assert_eq!(resolve_endpoint(&ollama), "http://localhost:11434/v1/chat/completions");
@@ -2679,6 +2811,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
             model: String::new(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -2687,6 +2820,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&openai).unwrap(), "https://api.openai.com/v1/models");
 
@@ -2696,6 +2831,7 @@ mod tests {
             auth_method: AiAuthMethod::ApiKey,
             endpoint: "https://api.anthropic.com/v1/messages".to_string(),
             model: String::new(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -2704,6 +2840,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
         assert_eq!(resolve_model_list_endpoint(&claude).unwrap(), "https://api.anthropic.com/v1/models");
     }
@@ -2716,6 +2854,7 @@ mod tests {
             auth_method: AiAuthMethod::ApiKey,
             endpoint: "https://gateway.example.com/anthropic/v1".to_string(),
             model: "claude-sonnet-4-20250514".to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::AnthropicMessages,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -2724,6 +2863,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
 
         assert!(uses_anthropic_messages_api(&config));
@@ -2760,6 +2901,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: "https://api.example.com".to_string(),
             model: "test-model".to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -2768,6 +2910,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
         assert_eq!(resolve_endpoint(&config), "https://api.example.com/v1/chat/completions");
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.example.com/v1/models");
@@ -2816,6 +2960,7 @@ mod tests {
             auth_method: AiAuthMethod::ApiKey,
             endpoint: "https://api.anthropic.com/v1/messages".to_string(),
             model: "claude-sonnet-4-20250514".to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -2824,6 +2969,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
 
         let api_key_headers = claude_headers(&config).unwrap();
@@ -2863,11 +3010,8 @@ mod tests {
         assert_eq!(
             parse_model_list_response(&data).unwrap(),
             vec![
-                AiModelInfo { id: "gpt-4o-mini".to_string(), display_name: None },
-                AiModelInfo {
-                    id: "claude-sonnet-4-20250514".to_string(),
-                    display_name: Some("Claude Sonnet 4".to_string())
-                },
+                AiModelInfo::new("gpt-4o-mini", None),
+                AiModelInfo::new("claude-sonnet-4-20250514", Some("Claude Sonnet 4".to_string())),
             ]
         );
     }
@@ -3104,6 +3248,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
             model: "gpt-5.5".to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -3112,6 +3257,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
 
         let mut body = serde_json::json!({
@@ -3169,6 +3316,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: "https://api.moonshot.cn/v1".to_string(),
             model: "kimi-k2.5".to_string(),
+            models: Vec::new(),
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -3177,6 +3325,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({
             "model": &config.model,
@@ -3192,13 +3342,14 @@ mod tests {
     }
 
     #[test]
-    fn keeps_extra_body_thinking_toggle_for_other_compatible_providers() {
-        let config = AiConfig {
-            provider: AiProvider::OpenaiCompatible,
+    fn omits_thinking_toggle_for_openai_requests() {
+        let mut config = AiConfig {
+            provider: AiProvider::Openai,
             api_key: "key".to_string(),
             auth_method: AiAuthMethod::Bearer,
-            endpoint: "https://example.com/v1".to_string(),
-            model: "qwen3".to_string(),
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            model: "gpt-5".to_string(),
+            models: vec![],
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -3207,6 +3358,47 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
+        };
+        let mut body = serde_json::json!({ "model": &config.model });
+
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+
+        assert!(body.get("extra_body").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+
+        // Provider identity preserves OpenAI semantics when requests use a custom gateway.
+        config.endpoint = "https://gateway.example.com/v1/chat/completions".to_string();
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+        assert!(body.get("extra_body").is_none());
+
+        // The official endpoint must also stay strict if a legacy config has a compatible provider value.
+        config.provider = AiProvider::OpenaiCompatible;
+        config.endpoint = "https://api.openai.com/v1/chat/completions".to_string();
+        apply_chat_completion_thinking_toggle(&mut body, &config);
+        assert!(body.get("extra_body").is_none());
+    }
+
+    #[test]
+    fn keeps_extra_body_thinking_toggle_for_other_compatible_providers() {
+        let config = AiConfig {
+            provider: AiProvider::OpenaiCompatible,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://example.com/v1".to_string(),
+            model: "qwen3".to_string(),
+            models: vec![],
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: false,
+            reasoning_level: AiReasoningLevel::Default,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({ "model": &config.model });
 
@@ -3229,6 +3421,7 @@ mod tests {
             auth_method: AiAuthMethod::Bearer,
             endpoint: "http://localhost:11434/v1".to_string(),
             model: "deepseek-r1:14b".to_string(),
+            models: vec![],
             api_style: AiApiStyle::Completions,
             proxy_enabled: false,
             proxy_url: String::new(),
@@ -3237,6 +3430,8 @@ mod tests {
             context_window: None,
             codex_cli_path: None,
             codex_cli_env: Default::default(),
+            claude_code_cli_path: None,
+            claude_code_cli_env: Default::default(),
         };
         let mut body = serde_json::json!({
             "model": &config.model,

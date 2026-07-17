@@ -168,12 +168,44 @@ type connectParams struct {
 	ConnectionString string `json:"connection_string"`
 }
 
+type completionAssistantRequest struct {
+	ConnectionID  string   `json:"connection_id"`
+	Database      string   `json:"database"`
+	Schema        string   `json:"schema"`
+	ObjectKinds   []string `json:"object_kinds"`
+	Mask          string   `json:"mask"`
+	CaseSensitive bool     `json:"case_sensitive"`
+	GlobalSearch  bool     `json:"global_search"`
+	MaxResults    int      `json:"max_results"`
+	ParentSchema  string   `json:"parent_schema"`
+	ParentName    string   `json:"parent_name"`
+	MatchMode     string   `json:"match_mode"`
+}
+
+type completionAssistantCandidate struct {
+	Name         string  `json:"name"`
+	Kind         string  `json:"kind"`
+	Database     *string `json:"database"`
+	Schema       *string `json:"schema"`
+	ParentSchema *string `json:"parent_schema"`
+	ParentName   *string `json:"parent_name"`
+	Comment      *string `json:"comment"`
+	DataType     *string `json:"data_type"`
+}
+
+type completionAssistantResponse struct {
+	Candidates   []completionAssistantCandidate `json:"candidates"`
+	Incomplete   bool                           `json:"incomplete"`
+	FallbackUsed bool                           `json:"fallback_used"`
+}
+
 type queryOptions struct {
-	SQL       string `json:"sql"`
-	Database  string `json:"database"`
-	Schema    string `json:"schema"`
-	MaxRows   int    `json:"maxRows"`
-	FetchSize int    `json:"fetchSize"`
+	SQL         string `json:"sql"`
+	Database    string `json:"database"`
+	Schema      string `json:"schema"`
+	MaxRows     int    `json:"maxRows"`
+	FetchSize   int    `json:"fetchSize"`
+	TimeoutSecs int    `json:"timeoutSecs"`
 }
 
 type queryResult struct {
@@ -324,6 +356,8 @@ type server struct {
 	activeCancelMu         sync.Mutex
 	activeCancel           context.CancelFunc
 	activeRows             map[*sql.Rows]context.CancelFunc
+	activeTimer            *time.Timer
+	activeTimedOut         bool
 }
 
 type agentSession struct {
@@ -636,6 +670,13 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "list_objects":
 		schema := stringParam(params, "schema")
 		result, err := s.listObjects(schema, metadataListConstraintsFromParams(params))
+		return result, false, err
+	case "completion_assistant_search_v1":
+		var request completionAssistantRequest
+		if err := decodeParams(params, &request); err != nil {
+			return nil, false, err
+		}
+		result, err := s.completionAssistantSearch(request)
 		return result, false, err
 	case "get_columns":
 		schema := stringParam(params, "schema")
@@ -1329,6 +1370,406 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	return emptyIfNil(result), rows.Err()
 }
 
+func (s *server) completionAssistantSearch(request completionAssistantRequest) (completionAssistantResponse, error) {
+	limit := request.MaxResults
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	preferredSchema := strings.ToUpper(strings.TrimSpace(request.Schema))
+	if preferredSchema == "" {
+		var err error
+		preferredSchema, err = s.currentSchema()
+		if err != nil {
+			return completionAssistantResponse{}, err
+		}
+	}
+
+	if completionRequestHasTableLikeKind(request.ObjectKinds) {
+		return s.completionAssistantTables(request, preferredSchema, limit)
+	}
+	if completionRequestHasRoutineKind(request.ObjectKinds) {
+		return s.completionAssistantRoutines(request, preferredSchema, limit)
+	}
+	return completionAssistantResponse{Candidates: []completionAssistantCandidate{}}, nil
+}
+
+func completionRequestHasTableLikeKind(kinds []string) bool {
+	if len(kinds) == 0 {
+		return true
+	}
+	for _, kind := range kinds {
+		switch strings.ToLower(strings.TrimSpace(kind)) {
+		case "table", "view":
+			return true
+		}
+	}
+	return false
+}
+
+func completionRequestHasRoutineKind(kinds []string) bool {
+	for _, kind := range kinds {
+		switch strings.ToLower(strings.TrimSpace(kind)) {
+		case "routine", "procedure", "function":
+			return true
+		}
+	}
+	return false
+}
+
+func (s *server) completionAssistantTables(request completionAssistantRequest, preferredSchema string, limit int) (completionAssistantResponse, error) {
+	scanLimit := limit * 3
+	if scanLimit < limit+1 {
+		scanLimit = limit + 1
+	}
+	if scanLimit > 1000 {
+		scanLimit = 1000
+	}
+	query := oracleCompletionTablesQuery(request, preferredSchema, scanLimit+1)
+	rows, err := s.queryRows(query.SQL, query.Args)
+	if err != nil {
+		return completionAssistantResponse{}, err
+	}
+
+	type tableRow struct {
+		owner, name, objectType string
+		targetOwner, targetName sql.NullString
+	}
+	rawRows := make([]tableRow, 0, scanLimit+1)
+	targets := make([]oracleCompletionSynonymTarget, 0)
+	for rows.Next() {
+		var row tableRow
+		if err := rows.Scan(&row.owner, &row.name, &row.objectType, &row.targetOwner, &row.targetName); err != nil {
+			s.closeRows(rows)
+			return completionAssistantResponse{}, err
+		}
+		rawRows = append(rawRows, row)
+		if strings.EqualFold(row.objectType, "SYNONYM") && row.targetOwner.Valid && row.targetName.Valid {
+			targets = append(targets, oracleCompletionSynonymTarget{Owner: row.targetOwner.String, Name: row.targetName.String})
+		}
+	}
+	rowsErr := rows.Err()
+	closeErr := s.closeRows(rows)
+	if rowsErr != nil {
+		return completionAssistantResponse{}, rowsErr
+	}
+	if closeErr != nil {
+		return completionAssistantResponse{}, closeErr
+	}
+
+	validTargets, err := s.oracleCompletionValidSynonymTargets(targets, oracleCompletionTableObjectTypes(request.ObjectKinds))
+	if err != nil {
+		return completionAssistantResponse{}, err
+	}
+	candidates := make([]completionAssistantCandidate, 0, limit+1)
+	for _, row := range rawRows {
+		if strings.EqualFold(row.objectType, "SYNONYM") {
+			if !row.targetOwner.Valid || !row.targetName.Valid {
+				continue
+			}
+			if _, ok := validTargets[oracleCompletionSynonymTargetKey(row.targetOwner.String, row.targetName.String)]; !ok {
+				continue
+			}
+		}
+		kind := "table"
+		if strings.EqualFold(row.objectType, "VIEW") {
+			kind = "view"
+		}
+		candidates = append(candidates, completionAssistantCandidate{
+			Name:     row.name,
+			Kind:     kind,
+			Database: stringPointer(request.Database),
+			Schema:   stringPointer(row.owner),
+			DataType: stringPointer(row.objectType),
+		})
+	}
+	incomplete := len(candidates) > limit || len(rawRows) > scanLimit
+	if incomplete {
+		if len(candidates) > limit {
+			candidates = candidates[:limit]
+		}
+	}
+	return completionAssistantResponse{Candidates: candidates, Incomplete: incomplete}, nil
+}
+
+type oracleCompletionSynonymTarget struct {
+	Owner string
+	Name  string
+}
+
+func oracleCompletionSynonymTargetKey(owner, name string) string {
+	return owner + "\x00" + name
+}
+
+func (s *server) oracleCompletionValidSynonymTargets(targets []oracleCompletionSynonymTarget, objectTypes []string) (map[string]struct{}, error) {
+	unique := make([]oracleCompletionSynonymTarget, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		key := oracleCompletionSynonymTargetKey(target.Owner, target.Name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, target)
+	}
+
+	valid := make(map[string]struct{}, len(unique))
+	const batchSize = 100
+	for start := 0; start < len(unique); start += batchSize {
+		end := start + batchSize
+		if end > len(unique) {
+			end = len(unique)
+		}
+		query := oracleCompletionSynonymTargetsQuery(unique[start:end], objectTypes)
+		rows, err := s.queryRows(query.SQL, query.Args)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var owner, name string
+			if err := rows.Scan(&owner, &name); err != nil {
+				s.closeRows(rows)
+				return nil, err
+			}
+			valid[oracleCompletionSynonymTargetKey(owner, name)] = struct{}{}
+		}
+		rowsErr := rows.Err()
+		closeErr := s.closeRows(rows)
+		if rowsErr != nil {
+			return nil, rowsErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+	}
+	return valid, nil
+}
+
+func (s *server) completionAssistantRoutines(request completionAssistantRequest, preferredSchema string, limit int) (completionAssistantResponse, error) {
+	query := oracleCompletionRoutinesQuery(request, preferredSchema, limit+1)
+	rows, err := s.queryRows(query.SQL, query.Args)
+	if err != nil {
+		return completionAssistantResponse{}, err
+	}
+	defer s.closeRows(rows)
+
+	candidates := make([]completionAssistantCandidate, 0, limit+1)
+	for rows.Next() {
+		var owner, name, objectType string
+		var parentName sql.NullString
+		if err := rows.Scan(&owner, &name, &objectType, &parentName); err != nil {
+			return completionAssistantResponse{}, err
+		}
+		kind := strings.ToLower(objectType)
+		if objectType == "PACKAGE" {
+			kind = "object"
+		}
+		candidate := completionAssistantCandidate{
+			Name:     name,
+			Kind:     kind,
+			Database: stringPointer(request.Database),
+			Schema:   stringPointer(owner),
+			DataType: stringPointer(objectType),
+		}
+		if parentName.Valid {
+			candidate.ParentSchema = stringPointer(owner)
+			candidate.ParentName = stringPointer(parentName.String)
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return completionAssistantResponse{}, err
+	}
+	incomplete := len(candidates) > limit
+	if incomplete {
+		candidates = candidates[:limit]
+	}
+	return completionAssistantResponse{Candidates: candidates, Incomplete: incomplete}, nil
+}
+
+func stringPointer(value string) *string {
+	if value == "" {
+		return nil
+	}
+	result := value
+	return &result
+}
+
+func oracleCompletionTableObjectTypes(kinds []string) []string {
+	objectTypes := make([]string, 0, 2)
+	for _, kind := range kinds {
+		switch strings.ToLower(strings.TrimSpace(kind)) {
+		case "table":
+			objectTypes = append(objectTypes, "'TABLE'")
+		case "view":
+			objectTypes = append(objectTypes, "'VIEW'")
+		}
+	}
+	if len(objectTypes) == 0 {
+		objectTypes = []string{"'TABLE'", "'VIEW'"}
+	}
+	return objectTypes
+}
+
+func oracleCompletionTablesQuery(request completionAssistantRequest, preferredSchema string, limit int) oracleMetadataListQuery {
+	objectTypes := oracleCompletionTableObjectTypes(request.ObjectKinds)
+	pattern := oracleCompletionLikePattern(request.Mask, request.MatchMode)
+	args := make([]any, 0, 7)
+	args = append(args, pattern)
+	objectNamePredicate := oracleCompletionNamePredicate("o.OBJECT_NAME", len(args), request.CaseSensitive)
+	objectOwnerPredicate := ""
+	synonymOwnerPredicate := ""
+	owner := ""
+	if !request.GlobalSearch {
+		owner = strings.ToUpper(strings.TrimSpace(request.ParentSchema))
+		if owner == "" {
+			owner = strings.ToUpper(strings.TrimSpace(request.Schema))
+		}
+		if owner == "" {
+			owner = preferredSchema
+		}
+		args = append(args, owner)
+		objectOwnerPredicate = fmt.Sprintf(" AND o.OWNER = :%d", len(args))
+	}
+	args = append(args, pattern)
+	synonymNamePredicate := oracleCompletionNamePredicate("s.SYNONYM_NAME", len(args), request.CaseSensitive)
+	if owner != "" {
+		args = append(args, owner)
+		synonymOwnerPredicate = fmt.Sprintf(" AND s.OWNER = :%d", len(args))
+	}
+	args = append(args, preferredSchema)
+	preferredParam := len(args)
+	args = append(args, strings.TrimSpace(request.Mask))
+	exactParam := len(args)
+	args = append(args, limit)
+	limitParam := len(args)
+
+	baseSQL := fmt.Sprintf(`SELECT o.OWNER,
+       o.OBJECT_NAME,
+       o.OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(128)) AS TARGET_OWNER,
+       CAST(NULL AS VARCHAR2(128)) AS TARGET_NAME
+  FROM ALL_OBJECTS o
+  WHERE o.OBJECT_TYPE IN (%s)
+    AND %s%s
+  UNION ALL
+  SELECT s.OWNER,
+       s.SYNONYM_NAME AS OBJECT_NAME,
+       'SYNONYM' AS OBJECT_TYPE,
+       s.TABLE_OWNER AS TARGET_OWNER,
+       s.TABLE_NAME AS TARGET_NAME
+  FROM ALL_SYNONYMS s
+	WHERE s.DB_LINK IS NULL
+	    AND %s%s`, strings.Join(objectTypes, ","), objectNamePredicate, objectOwnerPredicate, synonymNamePredicate, synonymOwnerPredicate)
+	unionSQL := fmt.Sprintf("SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, TARGET_OWNER, TARGET_NAME\nFROM (\n%s\n)", baseSQL)
+	orderedSQL := oracleCompletionOrderedSQL(unionSQL, "OBJECT_NAME", "OBJECT_TYPE", preferredParam, exactParam)
+	return oracleMetadataListQuery{
+		SQL:  fmt.Sprintf("SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, TARGET_OWNER, TARGET_NAME FROM (\n%s\n) WHERE ROWNUM <= :%d", orderedSQL, limitParam),
+		Args: args,
+	}
+}
+
+func oracleCompletionSynonymTargetsQuery(targets []oracleCompletionSynonymTarget, objectTypes []string) oracleMetadataListQuery {
+	args := make([]any, 0, len(targets)*2)
+	predicates := make([]string, 0, len(targets))
+	for _, target := range targets {
+		args = append(args, target.Owner, target.Name)
+		predicates = append(predicates, fmt.Sprintf("(o.OWNER = :%d AND o.OBJECT_NAME = :%d)", len(args)-1, len(args)))
+	}
+	return oracleMetadataListQuery{
+		SQL:  fmt.Sprintf("SELECT DISTINCT o.OWNER, o.OBJECT_NAME\nFROM ALL_OBJECTS o\nWHERE o.OBJECT_TYPE IN (%s)\n  AND (%s)", strings.Join(objectTypes, ","), strings.Join(predicates, " OR ")),
+		Args: args,
+	}
+}
+
+func oracleCompletionRoutinesQuery(request completionAssistantRequest, preferredSchema string, limit int) oracleMetadataListQuery {
+	pattern := oracleCompletionLikePattern(request.Mask, request.MatchMode)
+	args := make([]any, 0, 6)
+	baseSQL := `
+SELECT o.OWNER, o.OBJECT_NAME, o.OBJECT_TYPE, CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
+FROM ALL_OBJECTS o
+WHERE o.OBJECT_TYPE IN ('FUNCTION', 'PROCEDURE', 'PACKAGE')`
+	if parentName := strings.ToUpper(strings.TrimSpace(request.ParentName)); parentName != "" {
+		args = append(args, parentName)
+		parentParam := len(args)
+		baseSQL = fmt.Sprintf(`
+SELECT p.OWNER,
+       p.PROCEDURE_NAME AS OBJECT_NAME,
+       CASE WHEN EXISTS (
+         SELECT 1
+         FROM ALL_ARGUMENTS a
+         WHERE a.OWNER = p.OWNER
+           AND a.OBJECT_ID = p.OBJECT_ID
+           AND a.SUBPROGRAM_ID = p.SUBPROGRAM_ID
+           AND a.POSITION = 0
+       ) THEN 'FUNCTION' ELSE 'PROCEDURE' END AS OBJECT_TYPE,
+       p.OBJECT_NAME AS PARENT_NAME
+FROM ALL_PROCEDURES p
+WHERE p.OBJECT_TYPE = 'PACKAGE'
+  AND p.PROCEDURE_NAME IS NOT NULL
+  AND p.OBJECT_NAME = :%d`, parentParam)
+	}
+	args = append(args, pattern)
+	nameParam := len(args)
+
+	ownerPredicate := ""
+	if !request.GlobalSearch {
+		owner := strings.ToUpper(strings.TrimSpace(request.ParentSchema))
+		if owner == "" {
+			owner = strings.ToUpper(strings.TrimSpace(request.Schema))
+		}
+		if owner == "" {
+			owner = preferredSchema
+		}
+		args = append(args, owner)
+		ownerPredicate = fmt.Sprintf(" AND OWNER = :%d", len(args))
+	}
+	args = append(args, preferredSchema)
+	preferredParam := len(args)
+	args = append(args, strings.TrimSpace(request.Mask))
+	exactParam := len(args)
+	args = append(args, limit)
+	limitParam := len(args)
+
+	filteredSQL := fmt.Sprintf("SELECT DISTINCT OWNER, OBJECT_NAME, OBJECT_TYPE, PARENT_NAME\nFROM (\n%s\n)\nWHERE %s%s", baseSQL, oracleCompletionNamePredicate("OBJECT_NAME", nameParam, request.CaseSensitive), ownerPredicate)
+	orderedSQL := oracleCompletionOrderedSQL(filteredSQL, "OBJECT_NAME", "OBJECT_TYPE", preferredParam, exactParam)
+	return oracleMetadataListQuery{
+		SQL:  fmt.Sprintf("SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, PARENT_NAME FROM (\n%s\n) WHERE ROWNUM <= :%d", orderedSQL, limitParam),
+		Args: args,
+	}
+}
+
+func oracleCompletionNamePredicate(column string, parameter int, caseSensitive bool) string {
+	if caseSensitive {
+		return fmt.Sprintf("%s LIKE :%d ESCAPE '\\'", column, parameter)
+	}
+	return fmt.Sprintf("UPPER(%s) LIKE UPPER(:%d) ESCAPE '\\'", column, parameter)
+}
+
+func oracleCompletionLikePattern(mask, matchMode string) string {
+	escaped := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(strings.TrimSpace(mask))
+	if strings.EqualFold(strings.TrimSpace(matchMode), "contains") {
+		return "%" + escaped + "%"
+	}
+	return escaped + "%"
+}
+
+func oracleCompletionOrderedSQL(baseSQL, nameColumn, typeColumn string, preferredParam, exactParam int) string {
+	return fmt.Sprintf(`%s
+ORDER BY CASE
+           WHEN OWNER = :%d THEN 0
+           WHEN OWNER = 'PUBLIC' THEN 1
+           WHEN OWNER IN ('SYS','SYSTEM','SYSMAN','DBSNMP','OUTLN','XDB','MDSYS','CTXSYS','WMSYS') THEN 3
+           ELSE 2
+         END,
+         CASE WHEN UPPER(%s) = UPPER(:%d) THEN 0 ELSE 1 END,
+         CASE %s WHEN 'TABLE' THEN 0 WHEN 'VIEW' THEN 1 WHEN 'FUNCTION' THEN 0 WHEN 'PROCEDURE' THEN 1 WHEN 'PACKAGE' THEN 2 WHEN 'SYNONYM' THEN 3 ELSE 4 END,
+         %s,
+         OWNER`, baseSQL, preferredParam, nameColumn, exactParam, typeColumn, nameColumn)
+}
+
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 	schema, err := s.normalizeSchema(schema)
 	if err != nil {
@@ -1976,7 +2417,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 			HasMore:         false,
 		}, err
 	}
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -2042,7 +2483,7 @@ func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResul
 	if !isQuerySQL(sqlText) {
 		return queryPageResult{}, errors.New("table read requires a SELECT query")
 	}
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, opts.TimeoutSecs)
 	if err != nil {
 		return queryPageResult{}, err
 	}
@@ -2177,7 +2618,7 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		maxRows = defaultMaxRows
 	}
 	if isQuerySQL(sqlText) {
-		result, err := s.executeSelect(sqlText, maxRows)
+		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
@@ -2185,7 +2626,34 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	if err != nil {
 		return queryResult{}, err
 	}
-	execResult, err := db.Exec(sqlText)
+	ctx, cancel := context.WithCancel(context.Background())
+	var timer *time.Timer
+	if opts.TimeoutSecs > 0 {
+		var t *time.Timer
+		t = time.AfterFunc(time.Duration(opts.TimeoutSecs)*time.Second, func() {
+			s.activeCancelMu.Lock()
+			if s.activeTimer == t {
+				cancel()
+			}
+			s.activeCancelMu.Unlock()
+		})
+		timer = t
+	}
+	s.activeCancelMu.Lock()
+	s.activeCancel = cancel
+	s.activeTimer = timer
+	s.activeCancelMu.Unlock()
+	defer func() {
+		cancel()
+		s.activeCancelMu.Lock()
+		s.activeCancel = nil
+		if s.activeTimer != nil {
+			s.activeTimer.Stop()
+			s.activeTimer = nil
+		}
+		s.activeCancelMu.Unlock()
+	}()
+	execResult, err := db.ExecContext(ctx, sqlText)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -2193,8 +2661,8 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
 }
 
-func (s *server) executeSelect(sqlText string, maxRows int) (queryResult, error) {
-	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText)
+func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int) (queryResult, error) {
+	rows, err := s.queryRowsWithXMLTypeRewriteIfNeeded(sqlText, timeoutSecs)
 	if err != nil {
 		return queryResult{}, err
 	}
@@ -2253,8 +2721,8 @@ func columnTypeNames(rows *sql.Rows) []string {
 	return result
 }
 
-func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string) (*sql.Rows, error) {
-	rows, err := s.queryRows(sqlText, nil)
+func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string, timeoutSecs int) (*sql.Rows, error) {
+	rows, err := s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -2272,7 +2740,7 @@ func (s *server) queryRowsWithXMLTypeRewriteIfNeeded(sqlText string) (*sql.Rows,
 	// Only pay the ALL_TAB_COLUMNS rewrite cost when the result metadata shows
 	// XMLTYPE. Ordinary Oracle queries should not run dictionary probes first.
 	s.closeRows(rows)
-	return s.queryRows(rewritten, nil)
+	return s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
 }
 
 func rowsContainOracleXMLType(rows *sql.Rows) bool {
@@ -2901,22 +3369,50 @@ func (s *server) setSchema(schema string) error {
 }
 
 func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
+	return s.queryRowsWithTimeout(sqlText, args, 0)
+}
+
+func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs int) (*sql.Rows, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	var timer *time.Timer
+	if timeoutSecs > 0 {
+		var t *time.Timer
+		t = time.AfterFunc(time.Duration(timeoutSecs)*time.Second, func() {
+			s.activeCancelMu.Lock()
+			if s.activeTimer == t {
+				s.activeTimedOut = true
+				cancel()
+			}
+			s.activeCancelMu.Unlock()
+		})
+		timer = t
+	}
 	s.activeCancelMu.Lock()
 	s.activeCancel = cancel
+	s.activeTimer = timer
+	s.activeTimedOut = false
 	s.activeCancelMu.Unlock()
 	rows, queryErr := db.QueryContext(ctx, sqlText, args...)
 	s.activeCancelMu.Lock()
 	s.activeCancel = nil
+	if s.activeTimer != nil {
+		s.activeTimer.Stop()
+		s.activeTimer = nil
+	}
+	timedOut := s.activeTimedOut
 	if queryErr != nil {
 		cancel()
+	} else if timedOut {
+		cancel()
+		if rows != nil {
+			rows.Close()
+		}
+		queryErr = fmt.Errorf("query timed out after %ds", timeoutSecs)
 	} else {
-		// Keep the context alive for paged reads; database/sql may continue
-		// fetching from the driver until Rows is closed or exhausted.
 		s.activeRows[rows] = cancel
 	}
 	s.activeCancelMu.Unlock()
